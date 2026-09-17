@@ -56,8 +56,31 @@ jobs:
           tools/emsdk/emsdk install "$EMSDK_VERSION"
           tools/emsdk/emsdk activate "$EMSDK_VERSION"
 
+      - name: Provision native CPython 3.13 (numpy build-python)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
       - name: Bootstrap upstream source at the pin
         run: bash scripts/bootstrap.sh
+
+      - name: Check out Dawn at the pin (tint + shaderc source)
+        run: |
+          set -euo pipefail
+          if [ ! -d build-dawn/dawn/.git ]; then
+            rm -rf build-dawn/dawn
+            mkdir -p build-dawn
+            git clone --depth 1 --branch chromium/7989 https://dawn.googlesource.com/dawn build-dawn/dawn
+          fi
+          test "$(git -C build-dawn/dawn rev-parse HEAD)" = "36cf1fae0cd8a81a4fb4580751648b80b2e6255c"
+          git -C build-dawn/dawn submodule update --init --depth 1 \
+            third_party/abseil-cpp \
+            third_party/glslang/src \
+            third_party/spirv-headers/src \
+            third_party/spirv-tools/src \
+            third_party/jinja2 \
+            third_party/markupsafe
+          echo "Dawn + shader submodules ready"
 
       - name: Restore dependency caches
         id: deps-cache
