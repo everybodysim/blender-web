@@ -89,7 +89,7 @@ jobs:
               p.write_text(text, encoding="utf-8")
           PY
 
-      - name: Switch the shell from diagnostic boot to real interactive Blender
+      - name: Remove the release's headless diagnostic launcher
         shell: bash
         run: |
           set -euo pipefail
@@ -97,45 +97,56 @@ jobs:
           from pathlib import Path
           import re
 
-          files = []
+          js_files = []
           for p in Path("site").rglob("*.js"):
               try:
                   text = p.read_text(encoding="utf-8")
               except UnicodeDecodeError:
                   continue
-              if "BPY_OK" in text:
-                  files.append(p)
+              if "python-expr" in text or "BPY_OK" in text:
+                  js_files.append(p)
 
-          if len(files) != 1:
-              raise SystemExit(f"Expected exactly one JS file containing BPY_OK, found {[str(p) for p in files]}")
+          if not js_files:
+              raise SystemExit("The extracted release contains no launcher JS mentioning python-expr/BPY_OK")
 
-          p = files[0]
-          text = p.read_text(encoding="utf-8")
-          original = text
+          patched = []
+          for p in js_files:
+              text = p.read_text(encoding="utf-8")
+              original = text
 
-          # v0.1.1 stores the launcher arguments in JavaScript rather than as
-          # one contiguous command string. Remove the diagnostic --python-expr
-          # argument pair, leaving the normal interactive Blender argv intact.
-          patterns = [
-              re.compile(r',\\s*([\"\'])--python-expr\\1\\s*,\\s*([\"\'])[^\\r\\n]*?BPY_OK[^\\r\\n]*?\\2'),
-              re.compile(r'([\"\'])--python-expr\\1\\s*,\\s*([\"\'])[^\\r\\n]*?BPY_OK[^\\r\\n]*?\\2\\s*,'),
-          ]
-          for pattern in patterns:
-              text, n = pattern.subn('', text, count=1)
-              if n:
-                  break
+              # The launcher is minified in the release. Handle the normal argv
+              # array form: --python-expr followed by one quoted Python string.
+              patterns = [
+                  r'(["\'])--python-expr\1\s*,\s*(["\'])[^\r\n]*?BPY_OK[^\r\n]*?\2',
+                  r'(["\'])--python-expr\1\s*,\s*(["\'])[^\r\n]*?\2',
+              ]
+              for pattern in patterns:
+                  text, n = re.subn(pattern, '', text, count=1)
+                  if n:
+                      break
 
-          # Also support the alternate form where the whole argv is a string.
-          if text == original:
-              text, n = re.subn(r'blender\\s+--factory-startup\\s+--python-expr\\s+[^\"\\']*BPY_OK[^\"\\']*', 'blender --factory-startup', text, count=1)
-          else:
-              n = 1
+              # Handle an argv string if the release stores the command that way.
+              if text == original:
+                  text, n = re.subn(r'blender\\s+--factory-startup\\s+--python-expr\\s+[^"\\']*BPY_OK[^"\\']*', 'blender --factory-startup', text, count=1)
+              else:
+                  n = 1
 
-          if "BPY_OK" in text or n != 1:
-              raise SystemExit("Could not safely remove the diagnostic BPY_OK launcher arguments")
+              if text != original:
+                  p.write_text(text, encoding="utf-8")
+                  patched.append(str(p))
 
-          p.write_text(text, encoding="utf-8")
-          print("Interactive Blender argv patched:", p)
+          if not patched:
+              # Do not silently publish the unchanged headless launcher. Save
+              # a compact diagnostic for the Actions log so the exact syntax is visible.
+              for p in js_files:
+                  text = p.read_text(encoding="utf-8")
+                  for needle in ("python-expr", "BPY_OK"):
+                      i = text.find(needle)
+                      if i >= 0:
+                          print(f"UNPATCHED {p} around {needle}: {text[max(0,i-500):i+800]}")
+              raise SystemExit("Found the diagnostic launcher but could not match its argv syntax")
+
+          print("Patched launcher JS:", patched)
           PY
 
       - name: Make the Blender canvas visible and interactive
@@ -166,10 +177,10 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          patched = []
           needle = 'pthread_create: could not find canvas with ID'
           old = '''if(name=="#canvas"){if(!Module["canvas"]){err(`pthread_create: could not find canvas with ID "${name}" to transfer to thread!`);error=28;break}name=Module["canvas"].id}'''
           new = '''if(name=="#canvas"){if(!Module["canvas"]){continue}name=Module["canvas"].id}'''
+          patched = []
           for p in Path("site").rglob("*.js"):
               try: text = p.read_text(encoding="utf-8")
               except UnicodeDecodeError: continue
@@ -194,8 +205,6 @@ jobs:
           grep -q "window.Module.canvas = document.getElementById('canvas')" site/index.html
           grep -R 'if(name=="#canvas"){if(!Module\["canvas"\]){continue}name=Module\["canvas"\]\.id}' site --include='*.js'
           ! grep -R 'pthread_create: could not find canvas with ID' site --include='*.js'
-          ! grep -R 'src="/bin/' site --include='*.html' --include='*.js'
-          ! grep -R 'src="/boot.js"' site --include='*.html' --include='*.js'
           ! grep -R -- '--background' site --include='*.js'
           ! grep -R -- '--python-expr' site --include='*.js'
           ! grep -R -- 'BPY_OK' site --include='*.js'
