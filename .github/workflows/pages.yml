@@ -90,42 +90,52 @@ jobs:
           PY
 
       - name: Switch the shell from diagnostic boot to real interactive Blender
+        shell: bash
         run: |
+          set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
           import re
 
-          # The v0.1.1 release actually uses this diagnostic argv (note: no --background).
-          diagnostic = "blender --factory-startup --python-expr import bpy; print('BPY_OK', bpy.app.version_string, len(bpy.data.objects))"
-          replacements = [diagnostic]
-
-          found = []
+          files = []
           for p in Path("site").rglob("*.js"):
               try:
                   text = p.read_text(encoding="utf-8")
               except UnicodeDecodeError:
                   continue
-              if diagnostic in text:
-                  text = text.replace(diagnostic, "blender --factory-startup", 1)
-                  p.write_text(text, encoding="utf-8")
-                  found.append(str(p))
+              if "BPY_OK" in text:
+                  files.append(p)
 
-          # Also handle the alternate release form with --background.
-          if not found:
-              diagnostic_bg = "blender --background --factory-startup --python-expr import bpy; print('BPY_OK', bpy.app.version_string, len(bpy.data.objects))"
-              for p in Path("site").rglob("*.js"):
-                  try:
-                      text = p.read_text(encoding="utf-8")
-                  except UnicodeDecodeError:
-                      continue
-                  if diagnostic_bg in text:
-                      text = text.replace(diagnostic_bg, "blender --factory-startup", 1)
-                      p.write_text(text, encoding="utf-8")
-                      found.append(str(p))
+          if len(files) != 1:
+              raise SystemExit(f"Expected exactly one JS file containing BPY_OK, found {[str(p) for p in files]}")
 
-          if len(found) != 1:
-              raise SystemExit(f"Expected exactly one Blender boot script to switch to interactive mode, found {found}")
-          print("Interactive Blender argv patched:", found[0])
+          p = files[0]
+          text = p.read_text(encoding="utf-8")
+          original = text
+
+          # v0.1.1 stores the launcher arguments in JavaScript rather than as
+          # one contiguous command string. Remove the diagnostic --python-expr
+          # argument pair, leaving the normal interactive Blender argv intact.
+          patterns = [
+              re.compile(r',\\s*([\"\'])--python-expr\\1\\s*,\\s*([\"\'])[^\\r\\n]*?BPY_OK[^\\r\\n]*?\\2'),
+              re.compile(r'([\"\'])--python-expr\\1\\s*,\\s*([\"\'])[^\\r\\n]*?BPY_OK[^\\r\\n]*?\\2\\s*,'),
+          ]
+          for pattern in patterns:
+              text, n = pattern.subn('', text, count=1)
+              if n:
+                  break
+
+          # Also support the alternate form where the whole argv is a string.
+          if text == original:
+              text, n = re.subn(r'blender\\s+--factory-startup\\s+--python-expr\\s+[^\"\\']*BPY_OK[^\"\\']*', 'blender --factory-startup', text, count=1)
+          else:
+              n = 1
+
+          if "BPY_OK" in text or n != 1:
+              raise SystemExit("Could not safely remove the diagnostic BPY_OK launcher arguments")
+
+          p.write_text(text, encoding="utf-8")
+          print("Interactive Blender argv patched:", p)
           PY
 
       - name: Make the Blender canvas visible and interactive
