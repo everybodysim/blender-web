@@ -78,6 +78,26 @@ jobs:
               p.write_text(text, encoding="utf-8")
           PY
 
+      - name: Fix GitHub Pages relative runtime paths
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          index = Path("site/index.html")
+          text = index.read_text(encoding="utf-8")
+          text = text.replace('<script src="/bin/blender_browser.js"></script>',
+                              '<script src="./bin/blender_browser.js"></script>')
+          index.write_text(text, encoding="utf-8")
+
+          for name in ("boot.js", "boot-windowed.js"):
+              p = Path("site") / name
+              if p.exists():
+                  text = p.read_text(encoding="utf-8")
+                  text = text.replace('const BIN_PREFIX = "/bin/";',
+                                      'const BIN_PREFIX = new URL("./bin/", document.baseURI).href;')
+                  p.write_text(text, encoding="utf-8")
+          PY
+
       - name: Add GitHub Pages base-path compatibility
         run: |
           python3 - <<'PY'
