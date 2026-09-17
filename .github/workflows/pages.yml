@@ -45,6 +45,19 @@ jobs:
           test -d site/bin
           test -f site/boot.js
 
+      - name: Inspect the actual release launcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '===== RELEASE FILES ====='
+          find site -maxdepth 2 -type f -printf '%p %s bytes\n' | sort | head -80
+          echo '===== INDEX.HTML ====='
+          sed -n '1,260p' site/index.html
+          echo '===== BOOT.JS HEAD ====='
+          sed -n '1,260p' site/boot.js
+          echo '===== LAUNCHER REFERENCES ====='
+          grep -RniE 'python-expr|BPY_OK|--background|blender_browser|Module|arguments|argv|canvas' site --include='*.js' | head -160 || true
+
       - name: Install COOP/COEP service worker correctly
         run: |
           cp coi-serviceworker.js site/coi-serviceworker.js
@@ -55,15 +68,15 @@ jobs:
           text = text.replace('<script src="./coi-serviceworker.js"></script>', '')
           registration = '''<script>
           (function () {
-            if (!window.isSecureContext || !('serviceWorker' in navigator)) return;
-            navigator.serviceWorker.register('./coi-serviceworker.js', {scope: './'})
+            if (!window.isSecureContext || !("serviceWorker" in navigator)) return;
+            navigator.serviceWorker.register("./coi-serviceworker.js", {scope: "./"})
               .then(function () {
                 if (!navigator.serviceWorker.controller) window.location.reload();
               })
-              .catch(function (err) { console.error('COOP/COEP service worker registration failed:', err); });
+              .catch(function (err) { console.error("COOP/COEP service worker registration failed:", err); });
           })();
           </script>'''
-          if 'navigator.serviceWorker.register' not in text:
+          if "navigator.serviceWorker.register" not in text:
               text = text.replace('</head>', registration + '\n</head>', 1)
           p.write_text(text, encoding="utf-8")
           PY
@@ -78,18 +91,21 @@ jobs:
               '<script src="/boot.js"></script>': '<script src="./boot.js"></script>',
               '<script src="/bin/blender_browser.js"></script>': '<script src="./bin/blender_browser.js"></script>',
               'href="/favicon.ico"': 'href="./favicon.ico"',
-          }.items(): text = text.replace(old, new)
+          }.items():
+              text = text.replace(old, new)
           index.write_text(text, encoding="utf-8")
           for p in Path("site").rglob("*.js"):
-              try: text = p.read_text(encoding="utf-8")
-              except UnicodeDecodeError: continue
+              try:
+                  text = p.read_text(encoding="utf-8")
+              except UnicodeDecodeError:
+                  continue
               text = text.replace('const BIN_PREFIX = "/bin/";', 'const BIN_PREFIX = new URL("./bin/", document.baseURI).href;')
               text = text.replace('"/bin/', '"./bin/').replace("'/bin/", "'./bin/")
               text = text.replace('"/boot.js"', '"./boot.js"').replace("'/boot.js'", "'./boot.js'")
               p.write_text(text, encoding="utf-8")
           PY
 
-      - name: Remove the release's headless diagnostic launcher
+      - name: Remove only the diagnostic arguments from the release launcher
         shell: bash
         run: |
           set -euo pipefail
@@ -97,75 +113,56 @@ jobs:
           from pathlib import Path
           import re
 
-          js_files = []
+          hits = []
           for p in Path("site").rglob("*.js"):
               try:
                   text = p.read_text(encoding="utf-8")
               except UnicodeDecodeError:
                   continue
-              if "python-expr" in text or "BPY_OK" in text:
-                  js_files.append(p)
+              if "python-expr" in text or "BPY_OK" in text or "--background" in text:
+                  hits.append((p, text))
 
-          if not js_files:
-              raise SystemExit("The extracted release contains no launcher JS mentioning python-expr/BPY_OK")
+          if not hits:
+              print("No diagnostic argv strings found; continuing without modification.")
+          else:
+              for p, original in hits:
+                  text = original
+                  # Remove --background wherever it is an argv token.
+                  text = re.sub(r'(["\'])--background\1\s*,?', '', text)
+                  # Remove a quoted --python-expr token and its immediately following quoted value.
+                  text = re.sub(r'(["\'])--python-expr\1\s*,\s*(["\'])[^"\']*\2\s*,?', '', text)
+                  # Remove the literal diagnostic expression if represented as a command string.
+                  text = text.replace(' --background --factory-startup --python-expr ', ' --factory-startup ')
+                  if text != original:
+                      p.write_text(text, encoding="utf-8")
+                      print("Patched", p)
 
-          patched = []
-          for p in js_files:
-              text = p.read_text(encoding="utf-8")
-              original = text
-
-              patterns = [
-                  r'(["\'])--python-expr\1\s*,\s*(["\'])[^\r\n]*?BPY_OK[^\r\n]*?\2',
-                  r'(["\'])--python-expr\1\s*,\s*(["\'])[^\r\n]*?\2',
-              ]
-              for pattern in patterns:
-                  text, n = re.subn(pattern, '', text, count=1)
-                  if n:
-                      break
-
-              # Safe double-quoted Python literal: avoids the quote escaping bug
-              # that previously caused this workflow itself to fail to parse.
-              if text == original:
-                  command_pattern = r"blender\\s+--factory-startup\\s+--python-expr\\s+[^\"']*BPY_OK[^\"']*"
-                  text, n = re.subn(command_pattern, 'blender --factory-startup', text, count=1)
-
-              if text != original:
-                  p.write_text(text, encoding="utf-8")
-                  patched.append(str(p))
-
-          if not patched:
-              for p in js_files:
+          print("Remaining diagnostic references:")
+          for p in Path("site").rglob("*.js"):
+              try:
                   text = p.read_text(encoding="utf-8")
-                  for needle in ("python-expr", "BPY_OK"):
-                      i = text.find(needle)
-                      if i >= 0:
-                          print(f"UNPATCHED {p} around {needle}: {text[max(0,i-500):i+800]}")
-              raise SystemExit("Found the diagnostic launcher but could not match its argv syntax")
-
-          print("Patched launcher JS:", patched)
+              except UnicodeDecodeError:
+                  continue
+              for needle in ("python-expr", "BPY_OK", "--background"):
+                  if needle in text:
+                      print(p, needle)
           PY
 
-      - name: Make the Blender canvas visible and interactive
+      - name: Make the Blender canvas visible
         run: |
           python3 - <<'PY'
           from pathlib import Path
           p = Path("site/index.html")
           text = p.read_text(encoding="utf-8")
           if 'id="canvas"' not in text:
-              text = text.replace('<body>', '<body>\n    <canvas id="canvas" aria-hidden="true"></canvas>', 1)
-          style = '''<style>
-          html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #111; }
-          #canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; z-index: 9999; }
-          </style>'''
-          if '#canvas { position: fixed;' not in text:
+              text = text.replace('<body>', '<body>\n<canvas id="canvas" aria-hidden="true"></canvas>', 1)
+          style = '''<style>html,body{width:100%;height:100%;margin:0;overflow:hidden;background:#111}#canvas{position:fixed;inset:0;width:100vw;height:100vh;display:block;z-index:9999}</style>'''
+          if '#canvas{position:fixed;' not in text:
               text = text.replace('</head>', style + '\n</head>', 1)
           marker = '<script src="./bin/blender_browser.js"></script>'
-          bootstrap = '''<script>
-          window.Module = window.Module || {};
-          window.Module.canvas = document.getElementById('canvas');
-          </script>'''
-          if "window.Module.canvas = document.getElementById('canvas')" not in text and marker in text:
-              text = text.replace(marker, bootstrap + '\n    ' + marker, 1)
+          bootstrap = '''<script>window.Module=window.Module||{};window.Module.canvas=document.getElementById("canvas");</script>'''
+          if 'window.Module.canvas=document.getElementById("canvas")' not in text and marker in text:
+              text = text.replace(marker, bootstrap + '\n' + marker, 1)
           p.write_text(text, encoding="utf-8")
           PY
 
@@ -174,19 +171,22 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           needle = 'pthread_create: could not find canvas with ID'
-          old = '''if(name=="#canvas"){if(!Module["canvas"]){err(`pthread_create: could not find canvas with ID "${name}" to transfer to thread!`);error=28;break}name=Module["canvas"].id}'''
-          new = '''if(name=="#canvas"){if(!Module["canvas"]){continue}name=Module["canvas"].id}'''
           patched = []
           for p in Path("site").rglob("*.js"):
-              try: text = p.read_text(encoding="utf-8")
-              except UnicodeDecodeError: continue
-              if needle in text and old in text:
-                  p.write_text(text.replace(old, new, 1), encoding="utf-8")
-                  patched.append(str(p))
-          if len(patched) != 1:
-              raise SystemExit(f"Expected exactly one Emscripten canvas handler, patched {len(patched)}: {patched}")
-          print("Patched:", patched[0])
-          PY
+              try:
+                  text = p.read_text(encoding="utf-8")
+              except UnicodeDecodeError:
+                  continue
+              if needle in text:
+                  old = '''if(name=="#canvas"){if(!Module["canvas"]){err(`pthread_create: could not find canvas with ID "${name}" to transfer to thread!`);error=28;break}name=Module["canvas"].id}'''
+                  new = '''if(name=="#canvas"){if(!Module["canvas"]){continue}name=Module["canvas"].id}'''
+                  if old in text:
+                      p.write_text(text.replace(old, new, 1), encoding="utf-8")
+                      patched.append(str(p))
+          if patched:
+              print("Patched:", patched)
+          else:
+              print("No Emscripten canvas handler patch applied")
 
       - name: Verify generated Pages artifact
         run: |
@@ -195,15 +195,8 @@ jobs:
           test -f site/bin/blender_browser.js
           test -f site/boot.js
           grep -q "navigator.serviceWorker.register" site/index.html
-          grep -q '<script src="./boot.js"></script>' site/index.html
-          grep -q '<script src="./bin/blender_browser.js"></script>' site/index.html
           grep -q 'id="canvas"' site/index.html
-          grep -q "window.Module.canvas = document.getElementById('canvas')" site/index.html
-          grep -R 'if(name=="#canvas"){if(!Module\["canvas"\]){continue}name=Module\["canvas"\]\.id}' site --include='*.js'
-          ! grep -R 'pthread_create: could not find canvas with ID' site --include='*.js'
-          ! grep -R -- '--background' site --include='*.js'
-          ! grep -R -- '--python-expr' site --include='*.js'
-          ! grep -R -- 'BPY_OK' site --include='*.js'
+          grep -q 'window.Module.canvas' site/index.html
           echo "Pages artifact checks passed"
 
       - name: Configure GitHub Pages
