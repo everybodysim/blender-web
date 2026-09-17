@@ -125,8 +125,10 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           import re
-          patched = 0
-          needle = "pthread_create: could not find canvas with ID \""
+
+          needle = "pthread_create: could not find canvas with ID"
+          patched = []
+
           for p in Path("site").rglob("*.js"):
               try:
                   text = p.read_text(encoding="utf-8")
@@ -134,15 +136,56 @@ jobs:
                   continue
               if needle not in text:
                   continue
-              old = re.compile(r'if\("#canvas"==y\)\{if\(!w\.canvas\)\{D\(\'pthread_create: could not find canvas with ID "\'\+y\+\'" to transfer to thread!\'\);g=28;break\}y=w\.canvas\.id\}')
-              new = 'if("#canvas"==y){if(!w.canvas){continue}y=w.canvas.id}'
-              text2, n = old.subn(new, text, count=1)
-              if n:
+
+              # Do not depend on minifier-chosen variable names. Match the actual
+              # Emscripten error branch structurally and remove only the fatal
+              # missing-canvas path. A headless Blender invocation has no rendering
+              # canvas to transfer; the pthread itself can still be created.
+              pattern = re.compile(
+                  r'if\\((?P<sel>[^(){}]+)==(?P<name>[^(){}]+)\\)'
+                  r'\\{if\\(!(?P<mod>[^(){}]+)\\.canvas\\)\\{'
+                  r'(?P<body>[^{}]*?pthread_create: could not find canvas with ID[^{}]*?)'
+                  r';(?P<code>[^;{}]+)=28;break\\}'
+                  r'(?P<after>[^{}]*)\\}'
+              )
+
+              def replace(m):
+                  selector = m.group('sel')
+                  name = m.group('name')
+                  mod = m.group('mod')
+                  # Keep the normal canvas-transfer path untouched. If the
+                  # requested selector is #canvas but Module.canvas is absent,
+                  # skip that transfer entry instead of aborting pthread_create.
+                  return (
+                      f'if({selector}=={name}){{'
+                      f'if(!{mod}.canvas){{continue}}'
+                      f'{m.group("after")}'
+                      f'}}'
+                  )
+
+              text2, count = pattern.subn(replace, text, count=1)
+              if count:
                   p.write_text(text2, encoding="utf-8")
-                  patched += 1
-          if patched != 1:
-              raise SystemExit(f"Expected to patch exactly one pthread canvas handler, patched {patched}")
-          print("Patched headless pthread canvas handoff in", patched, "JS file")
+                  patched.append(str(p))
+
+          if len(patched) != 1:
+              # Print the real matching context so a future release change can be
+              # diagnosed from the Actions log instead of failing mysteriously.
+              matches = []
+              for p in Path("site").rglob("*.js"):
+                  try:
+                      text = p.read_text(encoding="utf-8")
+                  except UnicodeDecodeError:
+                      continue
+                  i = text.find(needle)
+                  if i >= 0:
+                      matches.append(f"--- {p} ---\\n{text[max(0, i-700):i+900]}")
+              print("\\n".join(matches))
+              raise SystemExit(f"Expected exactly one Emscripten canvas error handler, patched {len(patched)}")
+
+          print("Patched headless pthread canvas handoff:")
+          for p in patched:
+              print(" -", p)
           PY
 
       - name: Verify generated Pages artifact
@@ -156,7 +199,6 @@ jobs:
           grep -q '<script src="./bin/blender_browser.js"></script>' site/index.html
           grep -q 'id="canvas"' site/index.html
           grep -q "window.Module.canvas = document.getElementById('canvas')" site/index.html
-          grep -R 'if("#canvas"==y){if(!w.canvas){continue}y=w.canvas.id}' site --include='*.js'
           ! grep -R 'src="/bin/' site --include='*.html' --include='*.js'
           ! grep -R 'src="/boot.js"' site --include='*.html' --include='*.js'
           echo "Pages artifact checks passed"
