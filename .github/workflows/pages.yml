@@ -107,17 +107,42 @@ jobs:
           p = Path("site/index.html")
           text = p.read_text(encoding="utf-8")
           if 'id="canvas"' not in text:
-              text = text.replace('<body>', '<body>\n    <canvas id="canvas" aria-hidden="true" style="display:none"></canvas>', 1)
+              text = text.replace('<body>', '<body>\n    <canvas id="canvas" width="1" height="1" aria-hidden="true"></canvas>', 1)
           marker = '<script src="./bin/blender_browser.js"></script>'
           bootstrap = '''<script>
           // Emscripten's pthread startup expects the canvas selector #canvas to exist.
-          // Keep it hidden: Blender is still launched in background/headless mode.
+          // The Blender command is background/headless, so this is a 1x1 compatibility canvas.
           window.Module = window.Module || {};
           window.Module.canvas = document.getElementById('canvas');
           </script>'''
           if "window.Module.canvas = document.getElementById('canvas')" not in text and marker in text:
               text = text.replace(marker, bootstrap + '\n    ' + marker, 1)
           p.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Patch Emscripten headless pthread canvas handoff
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          patched = 0
+          needle = "pthread_create: could not find canvas with ID \""
+          for p in Path("site").rglob("*.js"):
+              try:
+                  text = p.read_text(encoding="utf-8")
+              except UnicodeDecodeError:
+                  continue
+              if needle not in text:
+                  continue
+              old = re.compile(r'if\("#canvas"==y\)\{if\(!w\.canvas\)\{D\(\'pthread_create: could not find canvas with ID "\'\+y\+\'" to transfer to thread!\'\);g=28;break\}y=w\.canvas\.id\}')
+              new = 'if("#canvas"==y){if(!w.canvas){continue}y=w.canvas.id}'
+              text2, n = old.subn(new, text, count=1)
+              if n:
+                  p.write_text(text2, encoding="utf-8")
+                  patched += 1
+          if patched != 1:
+              raise SystemExit(f"Expected to patch exactly one pthread canvas handler, patched {patched}")
+          print("Patched headless pthread canvas handoff in", patched, "JS file")
           PY
 
       - name: Verify generated Pages artifact
@@ -131,6 +156,7 @@ jobs:
           grep -q '<script src="./bin/blender_browser.js"></script>' site/index.html
           grep -q 'id="canvas"' site/index.html
           grep -q "window.Module.canvas = document.getElementById('canvas')" site/index.html
+          grep -R 'if("#canvas"==y){if(!w.canvas){continue}y=w.canvas.id}' site --include='*.js'
           ! grep -R 'src="/bin/' site --include='*.html' --include='*.js'
           ! grep -R 'src="/boot.js"' site --include='*.html' --include='*.js'
           echo "Pages artifact checks passed"
