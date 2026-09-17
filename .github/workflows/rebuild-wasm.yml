@@ -59,9 +59,6 @@ jobs:
       - name: Bootstrap upstream source at the pin
         run: bash scripts/bootstrap.sh
 
-      - name: Build host tools (datatoc, shader_tool, msgfmt)
-        run: bash harness/buildwrap.sh bash scripts/build-hosttools.sh
-
       - name: Restore dependency caches
         id: deps-cache
         uses: actions/cache@v4
@@ -110,6 +107,9 @@ jobs:
             fi
           done
           du -sh lib/wasm || true
+
+      - name: Build host tools (datatoc, shader_tool, msgfmt)
+        run: bash harness/buildwrap.sh bash scripts/build-hosttools.sh
 
       - name: Save dependency caches
         if: always()
