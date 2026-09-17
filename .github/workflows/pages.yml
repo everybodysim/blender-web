@@ -66,16 +66,13 @@ jobs:
           from pathlib import Path
           p = Path("site/index.html")
           text = p.read_text(encoding="utf-8")
-          bad = '<script src="./coi-serviceworker.js"></script>'
-          text = text.replace(bad, '')
+          text = text.replace('<script src="./coi-serviceworker.js"></script>', '')
           registration = '''<script>
           (function () {
             if (!window.isSecureContext || !('serviceWorker' in navigator)) return;
             navigator.serviceWorker.register('./coi-serviceworker.js', {scope: './'})
               .then(function () {
-                if (!navigator.serviceWorker.controller) {
-                  window.location.reload();
-                }
+                if (!navigator.serviceWorker.controller) window.location.reload();
               })
               .catch(function (err) {
                 console.error('COOP/COEP service worker registration failed:', err);
@@ -83,11 +80,8 @@ jobs:
           })();
           </script>'''
           if 'navigator.serviceWorker.register' not in text:
-              if '</head>' in text:
-                  text = text.replace('</head>', registration + '\n</head>', 1)
-              else:
-                  text = registration + '\n' + text
-          p.write_text(text, encoding='utf-8')
+              text = text.replace('</head>', registration + '\n</head>', 1)
+          p.write_text(text, encoding="utf-8")
           PY
 
       - name: Fix GitHub Pages relative runtime paths
@@ -96,7 +90,13 @@ jobs:
           from pathlib import Path
           index = Path("site/index.html")
           text = index.read_text(encoding="utf-8")
-          text = text.replace('<script src="/bin/blender_browser.js"></script>', '<script src="./bin/blender_browser.js"></script>')
+          replacements = {
+              '<script src="/boot.js"></script>': '<script src="./boot.js"></script>',
+              '<script src="/bin/blender_browser.js"></script>': '<script src="./bin/blender_browser.js"></script>',
+              'href="/favicon.ico"': 'href="./favicon.ico"',
+          }
+          for old, new in replacements.items():
+              text = text.replace(old, new)
           index.write_text(text, encoding="utf-8")
           for p in Path("site").rglob("*.js"):
               try:
@@ -105,6 +105,9 @@ jobs:
                   continue
               text = text.replace('const BIN_PREFIX = "/bin/";', 'const BIN_PREFIX = new URL("./bin/", document.baseURI).href;')
               text = text.replace('"/bin/', '"./bin/')
+              text = text.replace("'/bin/", "'./bin/")
+              text = text.replace('"/boot.js"', '"./boot.js"')
+              text = text.replace("'/boot.js'", "'./boot.js'")
               p.write_text(text, encoding="utf-8")
           PY
 
@@ -116,7 +119,7 @@ jobs:
           text = p.read_text(encoding="utf-8")
           if '<base href="./">' not in text and '<head>' in text:
               text = text.replace('<head>', '<head>\n    <base href="./">', 1)
-              p.write_text(text, encoding="utf-8")
+          p.write_text(text, encoding="utf-8")
           PY
 
       - name: Verify generated Pages artifact
@@ -124,8 +127,10 @@ jobs:
           set -euo pipefail
           test -f site/index.html
           test -f site/bin/blender_browser.js
+          test -f site/boot.js
           grep -q "navigator.serviceWorker.register" site/index.html
           ! grep -R 'src="/bin/' site --include='*.html' --include='*.js'
+          ! grep -R 'src="/boot.js"' site --include='*.html' --include='*.js'
           echo "Pages artifact checks passed"
 
       - name: Configure GitHub Pages
