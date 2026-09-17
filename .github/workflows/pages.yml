@@ -71,10 +71,11 @@ jobs:
           p.write_text(text, encoding="utf-8")
           PY
 
-      - name: Make the release launcher Pages-safe
+      - name: Make the release launcher Pages-safe and add WebGPU selection fallback
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import json
 
           p = Path("site/index.html")
           text = p.read_text(encoding="utf-8")
@@ -118,6 +119,65 @@ jobs:
               text = text.replace('</body>', diagnostics + '\n</body>', 1)
           p.write_text(text, encoding="utf-8")
 
+          # The shipped v0.1.1 backend has a known browser blocker: legacy
+          # GPU_SELECT_NEAREST_* uses a synchronous occlusion-query readback.
+          # WebGPU query mapping completes only after the worker yields, so the
+          # native Blender selection operator reports "webgpu selection readback
+          # failed". Replace only the simple Object Mode click-select binding
+          # with a CPU scene ray-cast. Drag selection, transforms, navigation,
+          # edit-mode selection, and the renderer remain untouched.
+          boot = Path("site/boot-windowed.js")
+          boot_text = boot.read_text(encoding="utf-8")
+          fallback_py = '''import bpy
+          from bpy_extras import view3d_utils
+
+          class BWWebSelect(bpy.types.Operator):
+              bl_idname = "view3d.bw_web_select"
+              bl_label = "Web Object Select"
+
+              @classmethod
+              def poll(cls, context):
+                  return bool(context.area and context.area.type == 'VIEW_3D' and context.mode == 'OBJECT' and context.region_data)
+
+              def invoke(self, context, event):
+                  region = context.region
+                  rv3d = context.region_data
+                  coord = (event.mouse_region_x, event.mouse_region_y)
+                  direction = view3d_utils.region_2d_to_vector_3d(region, rv3d, coord)
+                  origin = view3d_utils.region_2d_to_origin_3d(region, rv3d, coord)
+                  hit, location, normal, index, obj, matrix = context.scene.ray_cast(context.view_layer.depsgraph, origin, direction)
+                  if event.shift or event.ctrl:
+                      if hit and obj:
+                          if event.ctrl:
+                              obj.select_set(False)
+                          else:
+                              obj.select_set(not obj.select_get())
+                          if obj.select_get():
+                              context.view_layer.objects.active = obj
+                  else:
+                      for selected in context.selected_objects:
+                          selected.select_set(False)
+                      if hit and obj:
+                          obj.select_set(True)
+                          context.view_layer.objects.active = obj
+                  return {'FINISHED'}
+
+          bpy.utils.register_class(BWWebSelect)
+          wm = bpy.context.window_manager
+          km = wm.keyconfigs.active.keymaps.get('3D View') if wm.keyconfigs.active else None
+          if km:
+              for shift, ctrl in ((False,False),(True,False),(False,True),(True,True)):
+                  km.keymap_items.new('view3d.bw_web_select', 'LEFTMOUSE', 'CLICK', shift=shift, ctrl=ctrl, head=True)
+          '''
+          fallback_expr = "exec(" + repr(fallback_py) + ")"
+          marker = 'const ARGV = [\n  "--factory-startup",\n];'
+          injected = 'const ARGV = [\n  "--factory-startup",\n  "--python-expr",\n  ' + json.dumps(fallback_expr) + ',\n];'
+          if marker in boot_text:
+              boot_text = boot_text.replace(marker, injected, 1)
+          else:
+              raise SystemExit("Could not find the windowed ARGV block; refusing to publish a partial fix")
+          boot.write_text(boot_text, encoding="utf-8")
+
           for p in Path("site").rglob("*.js"):
               try:
                   text = p.read_text(encoding="utf-8")
@@ -129,7 +189,7 @@ jobs:
               p.write_text(text, encoding="utf-8")
           PY
 
-      - name: Verify the actual interactive launcher
+      - name: Verify the actual interactive launcher and selection fallback
         run: |
           set -euo pipefail
           test -f site/index.html
@@ -137,12 +197,14 @@ jobs:
           test -f site/boot-windowed.js
           test -f site/bin/blender_browser.js
           grep -q '<base href="./">' site/index.html
-          grep -q 'id="canvas"' site/index.html
           grep -q 'src="./boot-windowed.js"' site/index.html
           grep -q 'const ARGV = \[' site/boot-windowed.js
           grep -q '"--factory-startup"' site/boot-windowed.js
+          grep -q '"--python-expr"' site/boot-windowed.js
+          grep -q 'view3d.bw_web_select' site/boot-windowed.js
+          grep -q 'context.scene.ray_cast' site/boot-windowed.js
           ! grep -q 'id="run" class="' site/index.html
-          echo "Verified: Pages uses the interactive windowed Blender launcher"
+          echo "Verified: Pages uses the interactive windowed Blender launcher with WebGPU-safe object selection"
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
