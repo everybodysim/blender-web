@@ -111,7 +111,7 @@ jobs:
           marker = '<script src="./bin/blender_browser.js"></script>'
           bootstrap = '''<script>
           // Emscripten's pthread startup expects the canvas selector #canvas to exist.
-          // The Blender command is background/headless, so this is a 1x1 compatibility canvas.
+          // Blender is launched in background/headless mode, so this is a 1x1 compatibility canvas.
           window.Module = window.Module || {};
           window.Module.canvas = document.getElementById('canvas');
           </script>'''
@@ -124,11 +124,10 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          import re
-
-          needle = "pthread_create: could not find canvas with ID"
           patched = []
-
+          needle = 'pthread_create: could not find canvas with ID'
+          old = '''if(name=="#canvas"){if(!Module["canvas"]){err(`pthread_create: could not find canvas with ID "${name}" to transfer to thread!`);error=28;break}name=Module["canvas"].id}'''
+          new = '''if(name=="#canvas"){if(!Module["canvas"]){continue}name=Module["canvas"].id}'''
           for p in Path("site").rglob("*.js"):
               try:
                   text = p.read_text(encoding="utf-8")
@@ -136,54 +135,12 @@ jobs:
                   continue
               if needle not in text:
                   continue
-
-              # Do not depend on minifier-chosen variable names. Match the actual
-              # Emscripten error branch structurally and remove only the fatal
-              # missing-canvas path. A headless Blender invocation has no rendering
-              # canvas to transfer; the pthread itself can still be created.
-              pattern = re.compile(
-                  r'if\\((?P<sel>[^(){}]+)==(?P<name>[^(){}]+)\\)'
-                  r'\\{if\\(!(?P<mod>[^(){}]+)\\.canvas\\)\\{'
-                  r'(?P<body>[^{}]*?pthread_create: could not find canvas with ID[^{}]*?)'
-                  r';(?P<code>[^;{}]+)=28;break\\}'
-                  r'(?P<after>[^{}]*)\\}'
-              )
-
-              def replace(m):
-                  selector = m.group('sel')
-                  name = m.group('name')
-                  mod = m.group('mod')
-                  # Keep the normal canvas-transfer path untouched. If the
-                  # requested selector is #canvas but Module.canvas is absent,
-                  # skip that transfer entry instead of aborting pthread_create.
-                  return (
-                      f'if({selector}=={name}){{'
-                      f'if(!{mod}.canvas){{continue}}'
-                      f'{m.group("after")}'
-                      f'}}'
-                  )
-
-              text2, count = pattern.subn(replace, text, count=1)
-              if count:
-                  p.write_text(text2, encoding="utf-8")
+              if old in text:
+                  p.write_text(text.replace(old, new, 1), encoding="utf-8")
                   patched.append(str(p))
-
           if len(patched) != 1:
-              # Print the real matching context so a future release change can be
-              # diagnosed from the Actions log instead of failing mysteriously.
-              matches = []
-              for p in Path("site").rglob("*.js"):
-                  try:
-                      text = p.read_text(encoding="utf-8")
-                  except UnicodeDecodeError:
-                      continue
-                  i = text.find(needle)
-                  if i >= 0:
-                      matches.append(f"--- {p} ---\\n{text[max(0, i-700):i+900]}")
-              print("\\n".join(matches))
-              raise SystemExit(f"Expected exactly one Emscripten canvas error handler, patched {len(patched)}")
-
-          print("Patched headless pthread canvas handoff:")
+              raise SystemExit(f"Expected exactly one exact Emscripten canvas handler, patched {len(patched)}: {patched}")
+          print("Patched exact Emscripten canvas handler:")
           for p in patched:
               print(" -", p)
           PY
@@ -199,6 +156,8 @@ jobs:
           grep -q '<script src="./bin/blender_browser.js"></script>' site/index.html
           grep -q 'id="canvas"' site/index.html
           grep -q "window.Module.canvas = document.getElementById('canvas')" site/index.html
+          grep -R 'if(name=="#canvas"){if(!Module\["canvas"\]){continue}name=Module\["canvas"\]\.id}' site --include='*.js'
+          ! grep -R 'pthread_create: could not find canvas with ID' site --include='*.js'
           ! grep -R 'src="/bin/' site --include='*.html' --include='*.js'
           ! grep -R 'src="/boot.js"' site --include='*.html' --include='*.js'
           echo "Pages artifact checks passed"
