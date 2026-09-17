@@ -42,12 +42,9 @@ jobs:
             if [[ -d "$RELEASE_ROOT/$dir" && ! -e "site/$dir" ]]; then cp -a "$RELEASE_ROOT/$dir" "site/$dir"; fi
           done
 
-          # The release contains two launchers. index.html is the old headless
-          # diagnostic harness; windowed.html is the actual Blender UI launcher.
           test -f site/windowed.html
           test -f site/boot-windowed.js
           cp site/windowed.html site/index.html
-
           test -f site/index.html
           test -d site/bin
           test -f site/bin/blender_browser.js
@@ -74,26 +71,52 @@ jobs:
           p.write_text(text, encoding="utf-8")
           PY
 
-      - name: Fix GitHub Pages relative runtime paths
+      - name: Make the release launcher Pages-safe
         run: |
           python3 - <<'PY'
           from pathlib import Path
 
-          for p in Path("site").glob("*.html"):
-              text = p.read_text(encoding="utf-8")
-              replacements = {
-                  'src="/diagnostics-bootstrap.js"': 'src="./diagnostics-bootstrap.js"',
-                  'src="/bin/blender_browser.js"': 'src="./bin/blender_browser.js"',
-                  'src="/file-bridge.js"': 'src="./file-bridge.js"',
-                  'src="/boot-windowed.js"': 'src="./boot-windowed.js"',
-                  'src="/boot.js"': 'src="./boot.js"',
-                  'href="/fonts/': 'href="./fonts/',
-                  'src="/fonts/': 'src="./fonts/',
-                  'href="/favicon.ico"': 'href="./favicon.ico"',
-              }
-              for old, new in replacements.items():
-                  text = text.replace(old, new)
-              p.write_text(text, encoding="utf-8")
+          p = Path("site/index.html")
+          text = p.read_text(encoding="utf-8")
+          if '<base href="./">' not in text:
+              text = text.replace('<head>', '<head>\n<base href="./">', 1)
+
+          replacements = {
+              'src="/diagnostics-bootstrap.js"': 'src="./diagnostics-bootstrap.js"',
+              'src="/bin/blender_browser.js"': 'src="./bin/blender_browser.js"',
+              'src="/file-bridge.js"': 'src="./file-bridge.js"',
+              'src="/boot-windowed.js"': 'src="./boot-windowed.js"',
+              'src="/boot.js"': 'src="./boot.js"',
+              'href="/fonts/': 'href="./fonts/',
+              'src="/fonts/': 'src="./fonts/',
+              'href="/favicon.ico"': 'href="./favicon.ico"',
+          }
+          for old, new in replacements.items():
+              text = text.replace(old, new)
+
+          diagnostics = '''<script>
+          (function () {
+            function report(kind, value) {
+              try {
+                var msg = "[browser] " + kind + ": " + (value && value.stack ? value.stack : String(value));
+                console.error(msg);
+                var box = document.getElementById("bw-error");
+                if (!box) {
+                  box = document.createElement("pre");
+                  box.id = "bw-error";
+                  box.style.cssText = "position:fixed;left:12px;right:12px;bottom:12px;z-index:2147483647;max-height:35vh;overflow:auto;margin:0;padding:12px;background:#320f0f;color:#ffd5d5;border:1px solid #d66;border-radius:8px;font:12px/1.45 monospace;white-space:pre-wrap";
+                  document.body.appendChild(box);
+                }
+                box.textContent = msg;
+              } catch (_) {}
+            }
+            window.addEventListener("error", function (e) { report("error", e.error || e.message); });
+            window.addEventListener("unhandledrejection", function (e) { report("unhandled rejection", e.reason); });
+          })();
+          </script>'''
+          if 'id="bw-error"' not in text:
+              text = text.replace('</body>', diagnostics + '\n</body>', 1)
+          p.write_text(text, encoding="utf-8")
 
           for p in Path("site").rglob("*.js"):
               try:
@@ -106,32 +129,20 @@ jobs:
               p.write_text(text, encoding="utf-8")
           PY
 
-      - name: Make the Blender canvas the full-page surface
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path("site/index.html")
-          text = p.read_text(encoding="utf-8")
-          if 'window.Module=window.Module||{}' not in text:
-              marker = '<script src="./bin/blender_browser.js"></script>'
-              bootstrap = '''<script>window.Module=window.Module||{};window.Module.canvas=document.getElementById("canvas");</script>'''
-              if marker in text:
-                  text = text.replace(marker, bootstrap + '\n' + marker, 1)
-          p.write_text(text, encoding="utf-8")
-          PY
-
-      - name: Verify that Pages is using the windowed launcher
+      - name: Verify the actual interactive launcher
         run: |
           set -euo pipefail
           test -f site/index.html
+          test -f site/windowed.html
           test -f site/boot-windowed.js
           test -f site/bin/blender_browser.js
+          grep -q '<base href="./">' site/index.html
           grep -q 'id="canvas"' site/index.html
           grep -q 'src="./boot-windowed.js"' site/index.html
           grep -q 'const ARGV = \[' site/boot-windowed.js
           grep -q '"--factory-startup"' site/boot-windowed.js
           ! grep -q 'id="run" class="' site/index.html
-          echo "Verified: index.html is the real windowed Blender launcher"
+          echo "Verified: Pages uses the interactive windowed Blender launcher"
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
