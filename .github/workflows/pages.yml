@@ -71,7 +71,7 @@ jobs:
           p.write_text(text, encoding="utf-8")
           PY
 
-      - name: Make the release launcher Pages-safe and add WebGPU selection fallback
+      - name: Make the release launcher Pages-safe and add WebGPU crash mitigations
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -95,20 +95,65 @@ jobs:
           for old, new in replacements.items():
               text = text.replace(old, new)
 
+          # Diagnostics + crash recovery. The shipped v0.1.1 wasm binary still has
+          # unresolved WebGPU present/selection memory-safety bugs (tracked upstream
+          # as P0-selection-*/P0-window-resize-* items, never in a released build).
+          # A fatal wasm trap ("memory access out of bounds", "unreachable",
+          # "table index is out of bounds") corrupts the module's linear memory
+          # permanently; the ONLY safe recovery is a fresh page load. Left alone,
+          # every further mouse/key event re-enters the corrupted module and
+          # re-throws, spamming the console and eventually hanging the main thread
+          # hard enough that Chrome shows its own "page unresponsive" dialog. This
+          # detects the first fatal-looking trap, immediately stops feeding the
+          # module more input (so it can't cascade into a full tab hang), and shows
+          # a clear one-click "Reload Blender" affordance instead of a silent freeze.
           diagnostics = '''<script>
           (function () {
+            var recovered = false;
+            var FATAL_RE = /memory access out of bounds|out of bounds memory access|table index is out of bounds|unreachable|RuntimeError|abort\\(/i;
+            function showRecoveryOverlay() {
+              if (recovered) return;
+              recovered = true;
+              try {
+                var canvas = document.getElementById("canvas");
+                if (canvas) {
+                  canvas.style.pointerEvents = "none";
+                  canvas.style.filter = "blur(2px) brightness(0.6)";
+                  var blocker = function (e) { e.stopPropagation(); e.preventDefault(); };
+                  ["mousedown", "mouseup", "mousemove", "wheel", "keydown", "keyup", "click"].forEach(function (evt) {
+                    window.addEventListener(evt, blocker, true);
+                  });
+                }
+              } catch (_) {}
+              try {
+                var overlay = document.createElement("div");
+                overlay.id = "bw-crash-overlay";
+                overlay.style.cssText = "position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;background:rgba(10,10,12,0.72);font:15px/1.5 -apple-system,Segoe UI,Helvetica,Arial,sans-serif;color:#eee;text-align:center;";
+                overlay.innerHTML =
+                  '<div style="max-width:440px;padding:28px 32px;background:#1c1c1f;border:1px solid #3a3a3f;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,0.5);">' +
+                  '<div style="font-size:17px;font-weight:600;margin-bottom:10px;">Blender hit an internal error</div>' +
+                  '<div style="opacity:0.78;margin-bottom:18px;">This early WebAssembly build crashed and can\\'t safely continue. Reloading restarts it cleanly \\u2014 nothing was open, so nothing is lost.</div>' +
+                  '<button id="bw-crash-reload" style="background:#5b8cff;color:#fff;border:none;padding:10px 22px;border-radius:8px;font-weight:600;font-size:14px;cursor:pointer;">Reload Blender</button>' +
+                  '</div>';
+                document.body.appendChild(overlay);
+                var btn = document.getElementById("bw-crash-reload");
+                if (btn) btn.addEventListener("click", function () { window.location.reload(); });
+              } catch (_) {}
+            }
             function report(kind, value) {
               try {
-                var msg = "[browser] " + kind + ": " + (value && value.stack ? value.stack : String(value));
+                var text = value && value.stack ? value.stack : String(value);
+                var msg = "[browser] " + kind + ": " + text;
                 console.error(msg);
                 var box = document.getElementById("bw-error");
                 if (!box) {
                   box = document.createElement("pre");
                   box.id = "bw-error";
-                  box.style.cssText = "position:fixed;left:12px;right:12px;bottom:12px;z-index:2147483647;max-height:35vh;overflow:auto;margin:0;padding:12px;background:#320f0f;color:#ffd5d5;border:1px solid #d66;border-radius:8px;font:12px/1.45 monospace;white-space:pre-wrap";
+                  box.style.cssText = "position:fixed;left:12px;right:12px;bottom:12px;z-index:2147483646;max-height:35vh;overflow:auto;margin:0;padding:12px;background:#320f0f;color:#ffd5d5;border:1px solid #d66;border-radius:8px;font:12px/1.45 monospace;white-space:pre-wrap";
                   document.body.appendChild(box);
                 }
                 box.textContent = msg;
+                if (FATAL_RE.test(text) || FATAL_RE.test(kind)) showRecoveryOverlay();
               } catch (_) {}
             }
             window.addEventListener("error", function (e) { report("error", e.error || e.message); });
@@ -123,9 +168,19 @@ jobs:
           # GPU_SELECT_NEAREST_* uses a synchronous occlusion-query readback.
           # WebGPU query mapping completes only after the worker yields, so the
           # native Blender selection operator reports "webgpu selection readback
-          # failed". Replace only the simple Object Mode click-select binding
-          # with a CPU scene ray-cast. Drag selection, transforms, navigation,
-          # edit-mode selection, and the renderer remain untouched.
+          # failed" - and on this build, sometimes traps with an out-of-bounds
+          # wasm memory access instead of failing cleanly. Two mitigations, both
+          # scoped as narrowly as possible:
+          #   1. Replace only the simple Object Mode click-select binding with a
+          #      CPU scene ray-cast, so a plain click never reaches GPU_SELECT.
+          #   2. Turn off the on-screen move/rotate/scale gizmo. Its hover
+          #      highlight also calls into the same buggy GPU_SELECT path on
+          #      every mouse-move near the widget (no click needed), which is
+          #      the most likely cause of a crash within seconds of orbiting
+          #      near an object. G/R/S keyboard transforms keep working; only
+          #      the draggable on-canvas handles are hidden.
+          # Drag/box selection, navigation, edit-mode selection, and the
+          # renderer remain untouched.
           boot = Path("site/boot-windowed.js")
           boot_text = boot.read_text(encoding="utf-8")
           fallback_py = '''import bpy
@@ -168,6 +223,13 @@ jobs:
           if km:
               for shift, ctrl in ((False,False),(True,False),(False,True),(True,True)):
                   km.keymap_items.new('view3d.bw_web_select', 'LEFTMOUSE', 'CLICK', shift=shift, ctrl=ctrl, head=True)
+
+          for screen in bpy.data.screens:
+              for area in screen.areas:
+                  if area.type == 'VIEW_3D':
+                      for space in area.spaces:
+                          if space.type == 'VIEW_3D':
+                              space.show_gizmo = False
           '''
           fallback_expr = "exec(" + repr(fallback_py) + ")"
           marker = 'const ARGV = [\n  "--factory-startup",\n];'
@@ -189,7 +251,7 @@ jobs:
               p.write_text(text, encoding="utf-8")
           PY
 
-      - name: Verify the actual interactive launcher and selection fallback
+      - name: Verify the actual interactive launcher and crash mitigations
         run: |
           set -euo pipefail
           test -f site/index.html
@@ -203,8 +265,12 @@ jobs:
           grep -q '"--python-expr"' site/boot-windowed.js
           grep -q 'view3d.bw_web_select' site/boot-windowed.js
           grep -q 'context.scene.ray_cast' site/boot-windowed.js
+          grep -q 'show_gizmo = False' site/boot-windowed.js
+          grep -q 'bw-crash-overlay' site/index.html
+          grep -q 'Reload Blender' site/index.html
           ! grep -q 'id="run" class="' site/index.html
-          echo "Verified: Pages uses the interactive windowed Blender launcher with WebGPU-safe object selection"
+          node -c site/boot-windowed.js
+          echo "Verified: Pages uses the interactive windowed Blender launcher with WebGPU-safe object selection, gizmo-hover mitigation, and crash-recovery overlay"
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
