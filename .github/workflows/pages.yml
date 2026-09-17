@@ -237,6 +237,28 @@ jobs:
           boot = Path("site/boot-windowed.js")
           boot_text = boot.read_text(encoding="utf-8")
 
+          # (3) LOG CAP: the binary prints stdout/stderr line-by-line into a hidden
+          #     <pre id="log">, one DOM span each, with no cap. Warning storms
+          #     grow the DOM by thousands of nodes over minutes -> progressive
+          #     slowdown. Keep the newest 200 spans.
+          append_old = 'function append(text, cls) {\n  if (!logEl) return;\n  const span = document.createElement("span");'
+          append_new = 'function append(text, cls) {\n  if (!logEl) return;\n  while (logEl.firstChild && logEl.childNodes.length >= 200) logEl.removeChild(logEl.firstChild);\n  const span = document.createElement("span");'
+          if append_old not in boot_text:
+              raise SystemExit("append anchor missing; refusing to publish a partial fix")
+          boot_text = boot_text.replace(append_old, append_new, 1)
+
+          # (4) CONSOLE THROTTLE: same spam also fires console.log/error per line.
+          #     After the first 300 lines only every 200th is mirrored; the DOM
+          #     log and BWFileBridge still see every line.
+          print_old = '    print: (line) => {\n      console.log(line);'
+          print_new = '    print: (line) => {\n      __bwConsole("log", line);'
+          printerr_old = '    printErr: (line) => {\n      console.error(line);'
+          printerr_new = '    printErr: (line) => {\n      __bwConsole("error", line);'
+          if print_old not in boot_text or printerr_old not in boot_text:
+              raise SystemExit("print/printErr anchors missing; refusing to publish a partial fix")
+          boot_text = boot_text.replace(print_old, print_new, 1)
+          boot_text = boot_text.replace(printerr_old, printerr_new, 1)
+
           gate_marker = 'const GATE = gateMode();'
           if gate_marker not in boot_text:
               raise SystemExit("gate anchor missing; refusing to publish a partial fix")
@@ -267,6 +289,30 @@ jobs:
             if (!cap) return native;
             return Math.min(native, cap);
           }
+          // [pages-hardening] console spam throttle (see print/printErr patch).
+          function __bwConsole(method, line) {
+            var seen = (window.__bwConsoleSeen = (window.__bwConsoleSeen || 0) + 1);
+            if (seen <= 300 || seen % 200 === 0) {
+              try { console[method](line); } catch (_) {}
+            }
+          }
+          // [pages-hardening] resolution scale: renders the backing store at
+          // scale * cssPx and lets CSS stretch edge-to-edge. Wasm frame cost
+          // scales with backing pixels. ?scale=N (0.4-1.5) overrides and
+          // persists in localStorage; default 0.85.
+          (function () {
+            var scale = null;
+            try {
+              var q = new URLSearchParams(location.search).get("scale");
+              if (q) {
+                scale = Math.min(1.5, Math.max(0.4, parseFloat(q)));
+                try { localStorage.setItem("bw-scale", String(scale)); } catch (_) {}
+              } else {
+                scale = parseFloat(localStorage.getItem("bw-scale"));
+              }
+            } catch (_) {}
+            window.__BW_SCALE = (scale && isFinite(scale)) ? scale : 0.85;
+          })();
           const GATE = gateMode() || (window.__BW_GATE_DEFAULT || null);'''
           boot_text = boot_text.replace('const GATE = gateMode() || (window.__BW_GATE_DEFAULT || null);',
               dpr_helper, 1)
@@ -276,6 +322,16 @@ jobs:
               raise SystemExit(f"expected exactly 2 DPR reads, found {dpr_count}; refusing a partial patch")
           boot_text = boot_text.replace(dpr_marker,
               'const dpr = shellDpr(window.devicePixelRatio || 1);')
+
+          # (5) RESOLUTION SCALE: multiply both backing extents by __BW_SCALE.
+          backing_boot_old = '    w: Math.max(1, Math.round(cssW * dpr)),\n    h: Math.max(1, Math.round(cssH * dpr)),'
+          backing_boot_new = '    w: Math.max(1, Math.round(cssW * dpr * (window.__BW_SCALE || 1))),\n    h: Math.max(1, Math.round(cssH * dpr * (window.__BW_SCALE || 1))),'
+          backing_resize_old = '    const w = Math.max(1, Math.round(window.innerWidth * dpr));\n    const h = Math.max(1, Math.round(window.innerHeight * dpr));'
+          backing_resize_new = '    const w = Math.max(1, Math.round(window.innerWidth * dpr * (window.__BW_SCALE || 1)));\n    const h = Math.max(1, Math.round(window.innerHeight * dpr * (window.__BW_SCALE || 1)));'
+          if backing_boot_old not in boot_text or backing_resize_old not in boot_text:
+              raise SystemExit("backing-extent anchors missing; refusing to publish a partial fix")
+          boot_text = boot_text.replace(backing_boot_old, backing_boot_new, 1)
+          boot_text = boot_text.replace(backing_resize_old, backing_resize_new, 1)
 
           abort_old = '    onAbort: (what) => {\n      append("[shell] onAbort: " + what, "err");\n      finish("aborted", "aborted", undefined);\n    },'
           abort_new = '    onAbort: (what) => {\n      append("[shell] onAbort: " + what, "err");\n      if (window.__bwCrashOverlay) { try { window.__bwCrashOverlay("Blender aborted: " + what); } catch (_) {} }\n      finish("aborted", "aborted", undefined);\n    },'
@@ -374,6 +430,9 @@ jobs:
           grep -q 'show_gizmo = False' site/boot-windowed.js
           grep -q 'const GATE = gateMode() || (window.__BW_GATE_DEFAULT || null);' site/boot-windowed.js
           grep -q 'shellDpr(window.devicePixelRatio || 1)' site/boot-windowed.js
+          grep -q 'logEl.childNodes.length >= 200' site/boot-windowed.js
+          grep -q '__bwConsole("error", line)' site/boot-windowed.js
+          grep -q '__BW_SCALE || 1' site/boot-windowed.js
           grep -q '__bwCrashOverlay' site/boot-windowed.js
                     grep -q 'bw-crash-overlay' site/index.html
           grep -q 'Reload Blender' site/index.html

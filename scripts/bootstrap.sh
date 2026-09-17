@@ -22,6 +22,32 @@ ACTUAL=$(git rev-parse --short=12 HEAD)
 echo "pinned at: $ACTUAL (want ${PIN_COMMIT})"
 case "$ACTUAL" in "${PIN_COMMIT}"*) echo "PIN OK";; *) echo "PIN MISMATCH — investigate before proceeding" ;; esac
 cd ..
-git -C upstream lfs pull --include "release/datafiles/*"
+# LFS datafiles pull. GitHub's blender.git LFS is missing a handful of objects
+# (known 404s under release/datafiles/assets and others), and a single missing
+# object aborts the whole `git lfs pull`. Pull tolerantly, then try Blender's
+# canonical Gitea remote for whatever is still unresolved, and finally REPORT the
+# remaining pointer files instead of failing the bootstrap (the build preloads
+# datafiles wholesale; if a genuinely required file is missing the build itself
+# is the right place to surface it).
+git -C upstream config lfs.fetchinclude "release/datafiles/*"
+git -C upstream lfs pull || echo "bootstrap: lfs pull incomplete (expected on GitHub mirror); probing gaps"
+GAPS=$(cd upstream && find release/datafiles -type f -size -2k 2>/dev/null | while read -r f; do
+  head -c 30 "$f" 2>/dev/null | grep -q "^version https://git-lfs" && echo "$f"
+done)
+if [ -n "$GAPS" ]; then
+  echo "bootstrap: $(echo "$GAPS" | wc -l) datafiles still unresolved from GitHub LFS; trying projects.blender.org"
+  git -C upstream remote add blender https://projects.blender.org/blender/blender.git 2>/dev/null || true
+  git -C upstream fetch --no-tags blender "$PIN_BRANCH" \
+    && git -C upstream lfs fetch blender "$PIN_BRANCH" \
+    && git -C upstream lfs checkout \
+    || echo "bootstrap: projects.blender.org fallback incomplete"
+  GAPS=$(cd upstream && find release/datafiles -type f -size -2k 2>/dev/null | while read -r f; do
+    head -c 30 "$f" 2>/dev/null | grep -q "^version https://git-lfs" && echo "$f"
+  done)
+fi
+if [ -n "$GAPS" ]; then
+  echo "bootstrap: WARNING - datafiles still missing LFS objects:"
+  echo "$GAPS"
+fi
 du -sh upstream 2>/dev/null
 echo "bootstrap done $(date -u +%FT%TZ)" > scripts/bootstrap.done
