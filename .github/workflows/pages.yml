@@ -361,9 +361,10 @@ jobs:
           from pathlib import Path
           import re
           html = Path("site/index.html").read_text(encoding="utf-8")
-          m = re.search(r'<script>\n(.*?)\n</script>', html, re.S)
-          assert m and "bw-crash-overlay" in m.group(1), "hardening script missing"
-          Path("/tmp/overlay-check.js").write_text(m.group(1), encoding="utf-8")
+          scripts = re.findall(r'<script>([\s\S]*?)</script>', html)
+          overlay = [s for s in scripts if "bw-crash-overlay" in s]
+          assert overlay, "hardening script missing"
+          Path("/tmp/overlay-check.js").write_text(overlay[0], encoding="utf-8")
           PY
           node -c /tmp/overlay-check.js
           echo "Verified: interactive launcher, default gate mode, crash overlay + worker-abort wiring, WebGPU-safe selection and gizmo mitigation"
