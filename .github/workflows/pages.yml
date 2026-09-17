@@ -23,9 +23,7 @@ jobs:
 
       - name: Download hardware-verified Blender Web release
         run: |
-          curl -fL --retry 3 \
-            "https://github.com/gessa-ai/blender-web/releases/download/v0.1.1/blender-web-local-v0.1.1.tar.gz" \
-            -o blender-web.tar.gz
+          curl -fL --retry 3 "https://github.com/gessa-ai/blender-web/releases/download/v0.1.1/blender-web-local-v0.1.1.tar.gz" -o blender-web.tar.gz
           echo "1af405cd00d3471e105a39dad24a628aeb988f77b372c4c21bbf85ccbdca2ee0  blender-web.tar.gz" | sha256sum -c -
 
       - name: Extract release and assemble static site
@@ -35,29 +33,17 @@ jobs:
           rm -rf unpack site
           mkdir unpack site
           tar -xzf blender-web.tar.gz -C unpack
-
           SHELL_DIR="$(find unpack -type d -name shell -print -quit)"
-          if [[ -z "$SHELL_DIR" || ! -f "$SHELL_DIR/index.html" ]]; then
-            echo "Could not find release shell/index.html"
-            find unpack -maxdepth 4 -type f | head -100
-            exit 1
-          fi
-
+          test -n "$SHELL_DIR" && test -f "$SHELL_DIR/index.html"
           RELEASE_ROOT="$(dirname "$SHELL_DIR")"
           cp -a "$SHELL_DIR/." site/
-
-          if [[ -d "$RELEASE_ROOT/bin" ]]; then
-            cp -a "$RELEASE_ROOT/bin" site/bin
-          fi
-
+          if [[ -d "$RELEASE_ROOT/bin" ]]; then cp -a "$RELEASE_ROOT/bin" site/bin; fi
           for dir in assets data lib wasm; do
-            if [[ -d "$RELEASE_ROOT/$dir" && ! -e "site/$dir" ]]; then
-              cp -a "$RELEASE_ROOT/$dir" "site/$dir"
-            fi
+            if [[ -d "$RELEASE_ROOT/$dir" && ! -e "site/$dir" ]]; then cp -a "$RELEASE_ROOT/$dir" "site/$dir"; fi
           done
-
           test -f site/index.html
           test -d site/bin
+          test -f site/boot.js
 
       - name: Install COOP/COEP service worker correctly
         run: |
@@ -74,9 +60,7 @@ jobs:
               .then(function () {
                 if (!navigator.serviceWorker.controller) window.location.reload();
               })
-              .catch(function (err) {
-                console.error('COOP/COEP service worker registration failed:', err);
-              });
+              .catch(function (err) { console.error('COOP/COEP service worker registration failed:', err); });
           })();
           </script>'''
           if 'navigator.serviceWorker.register' not in text:
@@ -90,24 +74,18 @@ jobs:
           from pathlib import Path
           index = Path("site/index.html")
           text = index.read_text(encoding="utf-8")
-          replacements = {
+          for old, new in {
               '<script src="/boot.js"></script>': '<script src="./boot.js"></script>',
               '<script src="/bin/blender_browser.js"></script>': '<script src="./bin/blender_browser.js"></script>',
               'href="/favicon.ico"': 'href="./favicon.ico"',
-          }
-          for old, new in replacements.items():
-              text = text.replace(old, new)
+          }.items(): text = text.replace(old, new)
           index.write_text(text, encoding="utf-8")
           for p in Path("site").rglob("*.js"):
-              try:
-                  text = p.read_text(encoding="utf-8")
-              except UnicodeDecodeError:
-                  continue
+              try: text = p.read_text(encoding="utf-8")
+              except UnicodeDecodeError: continue
               text = text.replace('const BIN_PREFIX = "/bin/";', 'const BIN_PREFIX = new URL("./bin/", document.baseURI).href;')
-              text = text.replace('"/bin/', '"./bin/')
-              text = text.replace("'/bin/", "'./bin/")
-              text = text.replace('"/boot.js"', '"./boot.js"')
-              text = text.replace("'/boot.js'", "'./boot.js'")
+              text = text.replace('"/bin/', '"./bin/').replace("'/bin/", "'./bin/")
+              text = text.replace('"/boot.js"', '"./boot.js"').replace("'/boot.js'", "'./boot.js'")
               p.write_text(text, encoding="utf-8")
           PY
 
@@ -129,13 +107,14 @@ jobs:
           test -f site/bin/blender_browser.js
           test -f site/boot.js
           grep -q "navigator.serviceWorker.register" site/index.html
+          grep -q '<script src="./boot.js"></script>' site/index.html
+          grep -q '<script src="./bin/blender_browser.js"></script>' site/index.html
           ! grep -R 'src="/bin/' site --include='*.html' --include='*.js'
           ! grep -R 'src="/boot.js"' site --include='*.html' --include='*.js'
           echo "Pages artifact checks passed"
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
-
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v4
         with:
