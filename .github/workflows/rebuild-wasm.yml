@@ -157,6 +157,16 @@ jobs:
           git -C upstream apply ../patches/PREVIEW_SNAPSHOT.patch
           echo "canonical patch applied cleanly"
 
+      - name: Frame counter always shows 2 decimals
+        run: |
+          set -euo pipefail
+          FPS_FILE="upstream/source/blender/editors/space_view3d/view3d_draw.cc"
+          FPS_LINE='  bool show_fractional = state.fps_target_is_fractional;'
+          grep -q "$FPS_LINE" "$FPS_FILE" || { echo "fps anchor missing"; exit 1; }
+          sed -i "s|$FPS_LINE|  bool show_fractional = true;|" "$FPS_FILE"
+          grep -q '  bool show_fractional = true;' "$FPS_FILE"
+          echo "ED_scene_draw_fps now always renders fps: %.2f (integer form rounded stutter away)"
+
       - name: Restore dependency caches
         uses: actions/cache@v4
         with:
