@@ -41,22 +41,16 @@ jobs:
           for dir in assets data lib wasm; do
             if [[ -d "$RELEASE_ROOT/$dir" && ! -e "site/$dir" ]]; then cp -a "$RELEASE_ROOT/$dir" "site/$dir"; fi
           done
+
+          # The release contains two launchers. index.html is the old headless
+          # diagnostic harness; windowed.html is the actual Blender UI launcher.
+          test -f site/windowed.html
+          test -f site/boot-windowed.js
+          cp site/windowed.html site/index.html
+
           test -f site/index.html
           test -d site/bin
-          test -f site/boot.js
-
-      - name: Inspect the actual release launcher
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo '===== RELEASE FILES ====='
-          find site -maxdepth 2 -type f -printf '%p %s bytes\n' | sort | head -80
-          echo '===== INDEX.HTML ====='
-          sed -n '1,260p' site/index.html
-          echo '===== BOOT.JS HEAD ====='
-          sed -n '1,260p' site/boot.js
-          echo '===== LAUNCHER REFERENCES ====='
-          grep -RniE 'python-expr|BPY_OK|--background|blender_browser|Module|arguments|argv|canvas' site --include='*.js' | head -160 || true
+          test -f site/bin/blender_browser.js
 
       - name: Install COOP/COEP service worker correctly
         run: |
@@ -65,7 +59,6 @@ jobs:
           from pathlib import Path
           p = Path("site/index.html")
           text = p.read_text(encoding="utf-8")
-          text = text.replace('<script src="./coi-serviceworker.js"></script>', '')
           registration = '''<script>
           (function () {
             if (!window.isSecureContext || !("serviceWorker" in navigator)) return;
@@ -85,15 +78,23 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          index = Path("site/index.html")
-          text = index.read_text(encoding="utf-8")
-          for old, new in {
-              '<script src="/boot.js"></script>': '<script src="./boot.js"></script>',
-              '<script src="/bin/blender_browser.js"></script>': '<script src="./bin/blender_browser.js"></script>',
-              'href="/favicon.ico"': 'href="./favicon.ico"',
-          }.items():
-              text = text.replace(old, new)
-          index.write_text(text, encoding="utf-8")
+
+          for p in Path("site").glob("*.html"):
+              text = p.read_text(encoding="utf-8")
+              replacements = {
+                  'src="/diagnostics-bootstrap.js"': 'src="./diagnostics-bootstrap.js"',
+                  'src="/bin/blender_browser.js"': 'src="./bin/blender_browser.js"',
+                  'src="/file-bridge.js"': 'src="./file-bridge.js"',
+                  'src="/boot-windowed.js"': 'src="./boot-windowed.js"',
+                  'src="/boot.js"': 'src="./boot.js"',
+                  'href="/fonts/': 'href="./fonts/',
+                  'src="/fonts/': 'src="./fonts/',
+                  'href="/favicon.ico"': 'href="./favicon.ico"',
+              }
+              for old, new in replacements.items():
+                  text = text.replace(old, new)
+              p.write_text(text, encoding="utf-8")
+
           for p in Path("site").rglob("*.js"):
               try:
                   text = p.read_text(encoding="utf-8")
@@ -105,99 +106,32 @@ jobs:
               p.write_text(text, encoding="utf-8")
           PY
 
-      - name: Remove only the diagnostic arguments from the release launcher
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          hits = []
-          for p in Path("site").rglob("*.js"):
-              try:
-                  text = p.read_text(encoding="utf-8")
-              except UnicodeDecodeError:
-                  continue
-              if "python-expr" in text or "BPY_OK" in text or "--background" in text:
-                  hits.append((p, text))
-
-          if not hits:
-              print("No diagnostic argv strings found; continuing without modification.")
-          else:
-              for p, original in hits:
-                  text = original
-                  # Remove --background wherever it is an argv token.
-                  text = re.sub(r'(["\'])--background\1\s*,?', '', text)
-                  # Remove a quoted --python-expr token and its immediately following quoted value.
-                  text = re.sub(r'(["\'])--python-expr\1\s*,\s*(["\'])[^"\']*\2\s*,?', '', text)
-                  # Remove the literal diagnostic expression if represented as a command string.
-                  text = text.replace(' --background --factory-startup --python-expr ', ' --factory-startup ')
-                  if text != original:
-                      p.write_text(text, encoding="utf-8")
-                      print("Patched", p)
-
-          print("Remaining diagnostic references:")
-          for p in Path("site").rglob("*.js"):
-              try:
-                  text = p.read_text(encoding="utf-8")
-              except UnicodeDecodeError:
-                  continue
-              for needle in ("python-expr", "BPY_OK", "--background"):
-                  if needle in text:
-                      print(p, needle)
-          PY
-
-      - name: Make the Blender canvas visible
+      - name: Make the Blender canvas the full-page surface
         run: |
           python3 - <<'PY'
           from pathlib import Path
           p = Path("site/index.html")
           text = p.read_text(encoding="utf-8")
-          if 'id="canvas"' not in text:
-              text = text.replace('<body>', '<body>\n<canvas id="canvas" aria-hidden="true"></canvas>', 1)
-          style = '''<style>html,body{width:100%;height:100%;margin:0;overflow:hidden;background:#111}#canvas{position:fixed;inset:0;width:100vw;height:100vh;display:block;z-index:9999}</style>'''
-          if '#canvas{position:fixed;' not in text:
-              text = text.replace('</head>', style + '\n</head>', 1)
-          marker = '<script src="./bin/blender_browser.js"></script>'
-          bootstrap = '''<script>window.Module=window.Module||{};window.Module.canvas=document.getElementById("canvas");</script>'''
-          if 'window.Module.canvas=document.getElementById("canvas")' not in text and marker in text:
-              text = text.replace(marker, bootstrap + '\n' + marker, 1)
+          if 'window.Module=window.Module||{}' not in text:
+              marker = '<script src="./bin/blender_browser.js"></script>'
+              bootstrap = '''<script>window.Module=window.Module||{};window.Module.canvas=document.getElementById("canvas");</script>'''
+              if marker in text:
+                  text = text.replace(marker, bootstrap + '\n' + marker, 1)
           p.write_text(text, encoding="utf-8")
           PY
 
-      - name: Patch Emscripten pthread canvas handoff
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          needle = 'pthread_create: could not find canvas with ID'
-          patched = []
-          for p in Path("site").rglob("*.js"):
-              try:
-                  text = p.read_text(encoding="utf-8")
-              except UnicodeDecodeError:
-                  continue
-              if needle in text:
-                  old = '''if(name=="#canvas"){if(!Module["canvas"]){err(`pthread_create: could not find canvas with ID "${name}" to transfer to thread!`);error=28;break}name=Module["canvas"].id}'''
-                  new = '''if(name=="#canvas"){if(!Module["canvas"]){continue}name=Module["canvas"].id}'''
-                  if old in text:
-                      p.write_text(text.replace(old, new, 1), encoding="utf-8")
-                      patched.append(str(p))
-          if patched:
-              print("Patched:", patched)
-          else:
-              print("No Emscripten canvas handler patch applied")
-
-      - name: Verify generated Pages artifact
+      - name: Verify that Pages is using the windowed launcher
         run: |
           set -euo pipefail
           test -f site/index.html
+          test -f site/boot-windowed.js
           test -f site/bin/blender_browser.js
-          test -f site/boot.js
-          grep -q "navigator.serviceWorker.register" site/index.html
           grep -q 'id="canvas"' site/index.html
-          grep -q 'window.Module.canvas' site/index.html
-          echo "Pages artifact checks passed"
+          grep -q 'src="./boot-windowed.js"' site/index.html
+          grep -q 'const ARGV = \[' site/boot-windowed.js
+          grep -q '"--factory-startup"' site/boot-windowed.js
+          ! grep -q 'id="run" class="' site/index.html
+          echo "Verified: index.html is the real windowed Blender launcher"
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
