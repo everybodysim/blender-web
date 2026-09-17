@@ -114,8 +114,6 @@ jobs:
               text = p.read_text(encoding="utf-8")
               original = text
 
-              # The launcher is minified in the release. Handle the normal argv
-              # array form: --python-expr followed by one quoted Python string.
               patterns = [
                   r'(["\'])--python-expr\1\s*,\s*(["\'])[^\r\n]*?BPY_OK[^\r\n]*?\2',
                   r'(["\'])--python-expr\1\s*,\s*(["\'])[^\r\n]*?\2',
@@ -125,19 +123,17 @@ jobs:
                   if n:
                       break
 
-              # Handle an argv string if the release stores the command that way.
+              # Safe double-quoted Python literal: avoids the quote escaping bug
+              # that previously caused this workflow itself to fail to parse.
               if text == original:
-                  text, n = re.subn(r'blender\\s+--factory-startup\\s+--python-expr\\s+[^"\\']*BPY_OK[^"\\']*', 'blender --factory-startup', text, count=1)
-              else:
-                  n = 1
+                  command_pattern = r"blender\\s+--factory-startup\\s+--python-expr\\s+[^\"']*BPY_OK[^\"']*"
+                  text, n = re.subn(command_pattern, 'blender --factory-startup', text, count=1)
 
               if text != original:
                   p.write_text(text, encoding="utf-8")
                   patched.append(str(p))
 
           if not patched:
-              # Do not silently publish the unchanged headless launcher. Save
-              # a compact diagnostic for the Actions log so the exact syntax is visible.
               for p in js_files:
                   text = p.read_text(encoding="utf-8")
                   for needle in ("python-expr", "BPY_OK"):
