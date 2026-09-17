@@ -104,15 +104,8 @@ jobs:
           # needs a relink, which cannot happen from this repo - so this step
           # ships the strongest site-level mitigations instead:
           #
-          # (1) DEFAULT GATE MODE. Boot the canvas at a fixed 1280x720 with DPR
-          #     forced to 1 (the shell's own battle-tested ?gate= capture mode,
-          #     now the default). This removes the ENTIRE resize/DPR backbuffer
-          #     reconfiguration path - the buggiest surface in the present
-          #     pipeline (P0-window-resize-*, frame-episode races) - from boot
-          #     onward, and cuts per-frame present cost ~4x on HiDPI/full-HD
-          #     windows, which is most of the "hella laggy" symptom.
-          #     Escape hatches: ?gate=WxH renders at exactly that size;
-          #     ?gate=none restores the old full-window mode.
+          # (1) Gate mode stays OFF by default (full-window, native feel); ?gate=WxH
+          #     remains a manual stability/diagnostic mode.
           # (2) CRASH OVERLAY. A fatal wasm trap corrupts linear memory
           #     permanently; the only safe recovery is a fresh page load. The
           #     overlay detects the first trap (main-thread errors AND worker
@@ -128,11 +121,6 @@ jobs:
           hardening = '''<script>
           (function () {
             var recovered = false;
-            // (1) default gate unless the URL carries an explicit ?gate= value
-            try {
-              var q = new URLSearchParams(location.search).get("gate");
-              if (q == null) window.__BW_GATE_DEFAULT = { w: 1280, h: 720 };
-            } catch (_) {}
             // (3) probe adapter availability early (separate from the worker's
             //     own preinit; Chrome allows many requestAdapter calls)
             try {
@@ -214,7 +202,7 @@ jobs:
               try {
                 var t = value && value.stack ? value.stack : String(value);
                 console.error("[browser] " + kind + ": " + t);
-                if (/memory access out of bounds|out of bounds memory access|table index is out of bounds|unreachable|RuntimeError/i.test(t)) {
+                if (/memory access out of bounds|out of bounds memory access|table index is out of bounds|unreachable executed/i.test(t)) {
                   showRecoveryOverlay(kind + ": " + t);
                 }
               } catch (_) {}
@@ -352,8 +340,7 @@ jobs:
           grep -q 'show_gizmo = False' site/boot-windowed.js
           grep -q 'const GATE = gateMode() || (window.__BW_GATE_DEFAULT || null);' site/boot-windowed.js
           grep -q '__bwCrashOverlay' site/boot-windowed.js
-          grep -q '__BW_GATE_DEFAULT' site/index.html
-          grep -q 'bw-crash-overlay' site/index.html
+                    grep -q 'bw-crash-overlay' site/index.html
           grep -q 'Reload Blender' site/index.html
           ! grep -q 'id="run" class="' site/index.html
           node -c site/boot-windowed.js
