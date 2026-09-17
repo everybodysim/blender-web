@@ -100,6 +100,26 @@ jobs:
           p.write_text(text, encoding="utf-8")
           PY
 
+      - name: Add pthread canvas compatibility
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("site/index.html")
+          text = p.read_text(encoding="utf-8")
+          if 'id="canvas"' not in text:
+              text = text.replace('<body>', '<body>\n    <canvas id="canvas" aria-hidden="true" style="display:none"></canvas>', 1)
+          marker = '<script src="./bin/blender_browser.js"></script>'
+          bootstrap = '''<script>
+          // Emscripten's pthread startup expects the canvas selector #canvas to exist.
+          // Keep it hidden: Blender is still launched in background/headless mode.
+          window.Module = window.Module || {};
+          window.Module.canvas = document.getElementById('canvas');
+          </script>'''
+          if "window.Module.canvas = document.getElementById('canvas')" not in text and marker in text:
+              text = text.replace(marker, bootstrap + '\n    ' + marker, 1)
+          p.write_text(text, encoding="utf-8")
+          PY
+
       - name: Verify generated Pages artifact
         run: |
           set -euo pipefail
@@ -109,6 +129,8 @@ jobs:
           grep -q "navigator.serviceWorker.register" site/index.html
           grep -q '<script src="./boot.js"></script>' site/index.html
           grep -q '<script src="./bin/blender_browser.js"></script>' site/index.html
+          grep -q 'id="canvas"' site/index.html
+          grep -q "window.Module.canvas = document.getElementById('canvas')" site/index.html
           ! grep -R 'src="/bin/' site --include='*.html' --include='*.js'
           ! grep -R 'src="/boot.js"' site --include='*.html' --include='*.js'
           echo "Pages artifact checks passed"
