@@ -1,0 +1,246 @@
+# SPDX-FileCopyrightText: 2026 blender-web contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Rebuild the windowed-opt wasm product from the current tree.
+#
+# Why this exists: the v0.1.1 release tarball was cut on 2026-08-27, but the
+# tree carries substantial P0 fix work through 2026-08-29 (patches 0298-0301+,
+# GPU selection/readback/bind-group readiness, ghost keepalive) that was
+# RELINKED and software-verified but never shipped. This workflow builds the
+# current tree's windowed-opt binary and publishes it as a pre-release asset
+# that the Pages deployment can consume.
+#
+# Public repo: Actions minutes are free. Two jobs:
+#   deps   - emsdk + the scripts/deps superbuild (marker-idempotent, cached)
+#   build  - upstream @ pin + PREVIEW_SNAPSHOT.patch + configure + ninja +
+#            staged bundle assembly + pre-release upload
+name: Rebuild windowed-opt wasm product
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rebuild-wasm
+  cancel-in-progress: false
+
+env:
+  EMSDK_REPO_COMMIT: 1ab2e627b1a84567f5284d1baaa5f6be7ccf07de
+  EMSDK_VERSION: 6.0.5
+  DEV_TAG: v0.2.0-dev
+
+jobs:
+  deps:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install host build prerequisites
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            git-lfs ninja-build cmake build-essential pkg-config \
+            autoconf automake libtool xz-utils bzip2 unzip
+
+      - name: Install exact emsdk
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none --no-checkout https://github.com/emscripten-core/emsdk.git tools/emsdk
+          git -C tools/emsdk checkout --detach "$EMSDK_REPO_COMMIT"
+          test "$(git -C tools/emsdk rev-parse HEAD)" = "$EMSDK_REPO_COMMIT"
+          tools/emsdk/emsdk install "$EMSDK_VERSION"
+          tools/emsdk/emsdk activate "$EMSDK_VERSION"
+
+      - name: Bootstrap upstream source at the pin
+        run: bash scripts/bootstrap.sh
+
+      - name: Build host tools (datatoc, shader_tool, msgfmt)
+        run: bash harness/buildwrap.sh bash scripts/build-hosttools.sh
+
+      - name: Restore dependency caches
+        id: deps-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            lib/wasm
+            build-deps/_cache
+            build-hosttools
+          key: wasm-deps-${{ runner.os }}-${{ hashFiles('scripts/deps/**') }}
+          restore-keys: wasm-deps-${{ runner.os }}-
+
+      - name: Run the deps superbuild to a fixpoint
+        run: |
+          set -uo pipefail
+          # Every scripts/deps/*.sh is idempotent (installs into lib/wasm with
+          # marker checks) and fails fast when its own prerequisites are
+          # missing. Repeated passes therefore resolve the DAG automatically;
+          # a full pass that installs nothing new means we are done.
+          source tools/emsdk/emsdk_env.sh >/dev/null 2>&1
+          SCRIPTS="$(ls scripts/deps/*.sh | grep -v prune-preload-pycache)"
+          round=1
+          while :; do
+            progress=0
+            failed=0
+            for s in $SCRIPTS; do
+              name="$(basename "$s" .sh)"
+              if bash harness/buildwrap.sh bash "$s"; then
+                echo "== deps round $round: $name OK"
+              else
+                echo "== deps round $round: $name not ready (prerequisite pending)"
+                failed=$((failed + 1))
+              fi
+            done
+            # prune AFTER the python stdlib exists
+            if bash harness/buildwrap.sh bash scripts/deps/prune-preload-pycache.sh; then
+              echo "== deps round $round: prune-preload-pycache OK"
+            fi
+            if [ "$failed" -eq 0 ]; then
+              echo "DEPS FIXPOINT REACHED after round $round"
+              break
+            fi
+            round=$((round + 1))
+            if [ "$round" -gt 12 ]; then
+              echo "DEPS DID NOT CONVERGE after 12 rounds"
+              exit 1
+            fi
+          done
+          du -sh lib/wasm || true
+
+      - name: Save dependency caches
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            lib/wasm
+            build-deps/_cache
+            build-hosttools
+          key: wasm-deps-${{ runner.os }}-${{ github.run_id }}
+
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    needs: deps
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install host build prerequisites
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            git-lfs ninja-build cmake build-essential pkg-config \
+            autoconf automake libtool xz-utils bzip2 unzip
+
+      - name: Install exact emsdk
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none --no-checkout https://github.com/emscripten-core/emsdk.git tools/emsdk
+          git -C tools/emsdk checkout --detach "$EMSDK_REPO_COMMIT"
+          test "$(git -C tools/emsdk rev-parse HEAD)" = "$EMSDK_REPO_COMMIT"
+          tools/emsdk/emsdk install "$EMSDK_VERSION"
+          tools/emsdk/emsdk activate "$EMSDK_VERSION"
+
+      - name: Bootstrap upstream source at the pin (incl. LFS datafiles)
+        run: bash scripts/bootstrap.sh
+
+      - name: Apply the canonical squashed source patch
+        run: |
+          set -euo pipefail
+          test -f patches/PREVIEW_SNAPSHOT.patch
+          git -C upstream apply --check ../patches/PREVIEW_SNAPSHOT.patch
+          git -C upstream apply ../patches/PREVIEW_SNAPSHOT.patch
+          echo "canonical patch applied cleanly"
+
+      - name: Restore dependency caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            lib/wasm
+            build-deps/_cache
+            build-hosttools
+          key: wasm-deps-${{ runner.os }}-${{ needs.deps.outputs.deps_key || github.run_id }}
+          restore-keys: wasm-deps-${{ runner.os }}-
+
+      - name: Restore host tools / locale datafiles
+        run: |
+          set -euo pipefail
+          test -x build-hosttools/bin-native/datatoc
+          bash scripts/build-locale-datafiles.sh
+          ls build-hosttools/bin-native
+
+      - name: Configure the windowed-opt build
+        run: |
+          set -euo pipefail
+          source tools/emsdk/emsdk_env.sh >/dev/null 2>&1
+          export BLENDER_WEB_WINDOWED=1
+          emcmake cmake -S upstream -B build-wasm-windowed-opt -G Ninja \
+            -C patches/blender_web.cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DWITH_WEBGPU_BACKEND=ON
+
+      - name: Build blender_browser (windowed-opt)
+        run: |
+          set -euo pipefail
+          source tools/emsdk/emsdk_env.sh >/dev/null 2>&1
+          bash harness/buildwrap.sh bash scripts/ninja-locked.sh -C build-wasm-windowed-opt blender_browser
+          ls -la build-wasm-windowed-opt/bin
+
+      - name: Product preflight
+        run: |
+          set -euo pipefail
+          python3 scripts/windowed-product-preflight.py \
+            --build-bin build-wasm-windowed-opt/bin || true
+          du -sh build-wasm-windowed-opt/bin
+
+      - name: Assemble the staged bundle
+        run: |
+          set -euo pipefail
+          export EMSDK_NODE="$(echo "$PWD"/tools/emsdk/node/*_64bit/bin/node | head -1)"
+          test -x "$EMSDK_NODE"
+          bash sandbox/m8-staged-deploy/make_staged_bundle.sh --copy \
+            --out bundle-staged \
+            --bin "$PWD/build-wasm-windowed-opt/bin"
+          find bundle-staged -maxdepth 2 | head -40
+          du -sh bundle-staged
+
+      - name: Package the local-release tarball (same layout as v0.1.1)
+        run: |
+          set -euo pipefail
+          test -d bundle-staged/shell && test -f bundle-staged/shell/windowed.html
+          test -d bundle-staged/bin && test -f bundle-staged/bin/blender_browser.js
+          tar -czf blender-web-local-dev.tar.gz -C bundle-staged shell bin fonts 2>/dev/null \
+            || tar -czf blender-web-local-dev.tar.gz -C bundle-staged .
+          sha256sum blender-web-local-dev.tar.gz | tee tarball.sha256
+
+      - name: Upload tarball as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: blender-web-local-dev-tarball
+          path: |
+            blender-web-local-dev.tar.gz
+            tarball.sha256
+          retention-days: 30
+          compression-level: 0
+
+      - name: Publish as a pre-release asset
+        run: |
+          set -euo pipefail
+          AUTH="Authorization: token $GITHUB_TOKEN"
+          API="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          # delete any prior dev release + tag so the asset is always the newest build
+          curl -s -X DELETE -H "$AUTH" "$API/releases/tags/$DEV_TAG" || true
+          curl -s -X DELETE -H "$AUTH" "$API/git/refs/tags/$DEV_TAG" || true
+          body='Dev rebuild of the windowed-opt product from the current tree (patches through the 2026-08-29 P0 selection/readback/bind-group readiness work). Software-verified only; not hardware-verified. Pages deploys from this asset.'
+          RELEASE_ID=$(curl -s -X POST -H "$AUTH" -H "Content-Type: application/json" \
+            "$API/releases" -d "{\"tag_name\":\"$DEV_TAG\",\"name\":\"$DEV_TAG: dev windowed-opt rebuild\",\"prerelease\":true,\"body\":$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$body")}" \
+            | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+          curl -s -X POST -H "$AUTH" -H "Content-Type: application/octet-stream" \
+            --data-binary @blender-web-local-dev.tar.gz \
+            "$API/releases/$RELEASE_ID/assets?name=blender-web-local-dev.tar.gz" \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); print('asset url:', d.get('browser_download_url'))"
