@@ -95,73 +95,138 @@ jobs:
           for old, new in replacements.items():
               text = text.replace(old, new)
 
-          # Diagnostics + crash recovery. The shipped v0.1.1 wasm binary still has
-          # unresolved WebGPU present/selection memory-safety bugs (tracked upstream
-          # as P0-selection-*/P0-window-resize-* items, never in a released build).
-          # A fatal wasm trap ("memory access out of bounds", "unreachable",
-          # "table index is out of bounds") corrupts the module's linear memory
-          # permanently; the ONLY safe recovery is a fresh page load. Left alone,
-          # every further mouse/key event re-enters the corrupted module and
-          # re-throws, spamming the console and eventually hanging the main thread
-          # hard enough that Chrome shows its own "page unresponsive" dialog. This
-          # detects the first fatal-looking trap, immediately stops feeding the
-          # module more input (so it can't cascade into a full tab hang), and shows
-          # a clear one-click "Reload Blender" affordance instead of a silent freeze.
-          diagnostics = '''<script>
+          # =========================================================================
+          # Site-level hardening for the shipped v0.1.1 wasm binary. That binary
+          # still carries the upstream P0 present/selection memory-safety bugs
+          # (never fixed in a released build); on Windows/D3D it traps with
+          # "memory access out of bounds" within seconds and every further input
+          # event re-enters the corrupted module until the tab hangs. The real fix
+          # needs a relink, which cannot happen from this repo - so this step
+          # ships the strongest site-level mitigations instead:
+          #
+          # (1) DEFAULT GATE MODE. Boot the canvas at a fixed 1280x720 with DPR
+          #     forced to 1 (the shell's own battle-tested ?gate= capture mode,
+          #     now the default). This removes the ENTIRE resize/DPR backbuffer
+          #     reconfiguration path - the buggiest surface in the present
+          #     pipeline (P0-window-resize-*, frame-episode races) - from boot
+          #     onward, and cuts per-frame present cost ~4x on HiDPI/full-HD
+          #     windows, which is most of the "hella laggy" symptom.
+          #     Escape hatches: ?gate=WxH renders at exactly that size;
+          #     ?gate=none restores the old full-window mode.
+          # (2) CRASH OVERLAY. A fatal wasm trap corrupts linear memory
+          #     permanently; the only safe recovery is a fresh page load. The
+          #     overlay detects the first trap (main-thread errors AND worker
+          #     aborts via the shell onAbort/onExit hooks patched below), stops
+          #     feeding the module input, kills all main-thread timers (the
+          #     post-trap error spam that makes the page crawl), self-heals once
+          #     per 10 minutes with an automatic reload, and otherwise shows a
+          #     one-click Reload panel with the trap reason.
+          # (3) WEBGPU GATE PANEL. Visitors without WebGPU (or with it disabled)
+          #     get a clear "this device can't run it" panel instead of a
+          #     silent black boot failure.
+          # =========================================================================
+          hardening = '''<script>
           (function () {
             var recovered = false;
-            var FATAL_RE = /memory access out of bounds|out of bounds memory access|table index is out of bounds|unreachable|RuntimeError|abort\\(/i;
-            function showRecoveryOverlay() {
-              if (recovered) return;
-              recovered = true;
+            // (1) default gate unless the URL carries an explicit ?gate= value
+            try {
+              var q = new URLSearchParams(location.search).get("gate");
+              if (q == null) window.__BW_GATE_DEFAULT = { w: 1280, h: 720 };
+            } catch (_) {}
+            // (3) probe adapter availability early (separate from the worker's
+            //     own preinit; Chrome allows many requestAdapter calls)
+            try {
+              if (window.navigator && navigator.gpu && navigator.gpu.requestAdapter) {
+                navigator.gpu.requestAdapter().then(function (a) {
+                  window.__bwAdapterOK = !!a;
+                }, function () { window.__bwAdapterOK = false; });
+              } else {
+                window.__bwAdapterOK = false;
+              }
+            } catch (_) {}
+
+            function killTimers() {
               try {
+                var id = setTimeout(function () {}, 0);
+                while (id > 0) { clearTimeout(id); clearInterval(id); id -= 1; }
+              } catch (_) {}
+            }
+            function blockInput() {
+              try {
+                var blocker = function (e) { e.stopPropagation(); e.preventDefault(); };
+                ["mousedown", "mouseup", "mousemove", "wheel", "keydown", "keyup", "click", "touchstart", "touchmove", "contextmenu"].forEach(function (evt) {
+                  window.addEventListener(evt, blocker, true);
+                });
                 var canvas = document.getElementById("canvas");
                 if (canvas) {
                   canvas.style.pointerEvents = "none";
                   canvas.style.filter = "blur(2px) brightness(0.6)";
-                  var blocker = function (e) { e.stopPropagation(); e.preventDefault(); };
-                  ["mousedown", "mouseup", "mousemove", "wheel", "keydown", "keyup", "click"].forEach(function (evt) {
-                    window.addEventListener(evt, blocker, true);
-                  });
                 }
-              } catch (_) {}
-              try {
-                var overlay = document.createElement("div");
-                overlay.id = "bw-crash-overlay";
-                overlay.style.cssText = "position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;background:rgba(10,10,12,0.72);font:15px/1.5 -apple-system,Segoe UI,Helvetica,Arial,sans-serif;color:#eee;text-align:center;";
-                overlay.innerHTML =
-                  '<div style="max-width:440px;padding:28px 32px;background:#1c1c1f;border:1px solid #3a3a3f;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,0.5);">' +
-                  '<div style="font-size:17px;font-weight:600;margin-bottom:10px;">Blender hit an internal error</div>' +
-                  '<div style="opacity:0.78;margin-bottom:18px;">This early WebAssembly build crashed and can\\'t safely continue. Reloading restarts it cleanly \\u2014 nothing was open, so nothing is lost.</div>' +
-                  '<button id="bw-crash-reload" style="background:#5b8cff;color:#fff;border:none;padding:10px 22px;border-radius:8px;font-weight:600;font-size:14px;cursor:pointer;">Reload Blender</button>' +
-                  '</div>';
-                document.body.appendChild(overlay);
-                var btn = document.getElementById("bw-crash-reload");
-                if (btn) btn.addEventListener("click", function () { window.location.reload(); });
               } catch (_) {}
             }
+            function panel(inner) {
+              var overlay = document.createElement("div");
+              overlay.id = "bw-crash-overlay";
+              overlay.style.cssText = "position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;background:rgba(10,10,12,0.72);font:15px/1.5 -apple-system,Segoe UI,Helvetica,Arial,sans-serif;color:#eee;text-align:center;";
+              overlay.innerHTML = '<div style="max-width:480px;padding:28px 32px;background:#1c1c1f;border:1px solid #3a3a3f;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,0.5);">' + inner + '</div>';
+              document.body.appendChild(overlay);
+              var btn = document.getElementById("bw-crash-reload");
+              if (btn) btn.addEventListener("click", function () { window.location.reload(); });
+            }
+            function showNoWebGPU() {
+              blockInput();
+              try {
+                panel(
+                  '<div style="font-size:17px;font-weight:600;margin-bottom:10px;">This browser cannot run the editor yet</div>' +
+                  '<div style="opacity:0.78;margin-bottom:18px;">It needs <b>WebGPU</b>, which is unavailable on this device. Try current desktop Chrome or Edge on a machine with hardware WebGPU enabled (chrome://gpu lists it under WebGPU).</div>' +
+                  '<button id="bw-crash-reload" style="background:#5b8cff;color:#fff;border:none;padding:10px 22px;border-radius:8px;font-weight:600;font-size:14px;cursor:pointer;">Retry</button>');
+              } catch (_) {}
+            }
+            function showRecoveryOverlay(reason) {
+              if (recovered) return;
+              recovered = true;
+              if (window.__bwAdapterOK === false) { showNoWebGPU(); return; }
+              blockInput();
+              killTimers();
+              // Self-heal a transient boot race once per 10 minutes; a
+              // deterministic trap then lands on the panel instead of a loop.
+              try {
+                var last = parseInt(sessionStorage.getItem("bw-crash-reload-at") || "0", 10);
+                if (Date.now() - last > 600000) {
+                  sessionStorage.setItem("bw-crash-reload-at", String(Date.now()));
+                  window.location.reload();
+                  return;
+                }
+              } catch (_) {}
+              try {
+                var short = String(reason || "").split("\\n")[0].slice(0, 300);
+                panel(
+                  '<div style="font-size:17px;font-weight:600;margin-bottom:10px;">Blender hit an internal error</div>' +
+                  '<div style="opacity:0.78;margin-bottom:10px;">This early WebAssembly build crashed and can\\'t safely continue. Reloading restarts it cleanly.</div>' +
+                  '<div style="max-height:90px;overflow:auto;margin-bottom:18px;padding:8px 10px;background:#111;border:1px solid #2e2e33;border-radius:6px;font:11px/1.4 monospace;color:#ff9c9c;text-align:left;">' +
+                  String(short).replace(/[&<>]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]; }) + '</div>' +
+                  '<button id="bw-crash-reload" style="background:#5b8cff;color:#fff;border:none;padding:10px 22px;border-radius:8px;font-weight:600;font-size:14px;cursor:pointer;">Reload Blender</button>');
+              } catch (_) {}
+            }
+            window.__bwCrashOverlay = showRecoveryOverlay;
+
             function report(kind, value) {
               try {
-                var text = value && value.stack ? value.stack : String(value);
-                var msg = "[browser] " + kind + ": " + text;
-                console.error(msg);
-                var box = document.getElementById("bw-error");
-                if (!box) {
-                  box = document.createElement("pre");
-                  box.id = "bw-error";
-                  box.style.cssText = "position:fixed;left:12px;right:12px;bottom:12px;z-index:2147483646;max-height:35vh;overflow:auto;margin:0;padding:12px;background:#320f0f;color:#ffd5d5;border:1px solid #d66;border-radius:8px;font:12px/1.45 monospace;white-space:pre-wrap";
-                  document.body.appendChild(box);
+                var t = value && value.stack ? value.stack : String(value);
+                console.error("[browser] " + kind + ": " + t);
+                if (/memory access out of bounds|out of bounds memory access|table index is out of bounds|unreachable|RuntimeError/i.test(t)) {
+                  showRecoveryOverlay(kind + ": " + t);
                 }
-                box.textContent = msg;
-                if (FATAL_RE.test(text) || FATAL_RE.test(kind)) showRecoveryOverlay();
               } catch (_) {}
             }
             window.addEventListener("error", function (e) { report("error", e.error || e.message); });
             window.addEventListener("unhandledrejection", function (e) { report("unhandled rejection", e.reason); });
           })();
           </script>'''
-          if 'id="bw-error"' not in text:
-              text = text.replace('</body>', diagnostics + '\n</body>', 1)
+          anchor = '<script src="./diagnostics-bootstrap.js">'
+          if anchor not in text:
+              raise SystemExit("diagnostics-bootstrap anchor missing; refusing to publish a partial fix")
+          text = text.replace(anchor, hardening + '\n  ' + anchor, 1)
           p.write_text(text, encoding="utf-8")
 
           # The shipped v0.1.1 backend has a known browser blocker: legacy
@@ -183,6 +248,25 @@ jobs:
           # renderer remain untouched.
           boot = Path("site/boot-windowed.js")
           boot_text = boot.read_text(encoding="utf-8")
+
+          gate_marker = 'const GATE = gateMode();'
+          if gate_marker not in boot_text:
+              raise SystemExit("gate anchor missing; refusing to publish a partial fix")
+          boot_text = boot_text.replace(gate_marker,
+              'const GATE = gateMode() || (window.__BW_GATE_DEFAULT || null);', 1)
+
+          abort_old = '    onAbort: (what) => {\n      append("[shell] onAbort: " + what, "err");\n      finish("aborted", "aborted", undefined);\n    },'
+          abort_new = '    onAbort: (what) => {\n      append("[shell] onAbort: " + what, "err");\n      if (window.__bwCrashOverlay) { try { window.__bwCrashOverlay("Blender aborted: " + what); } catch (_) {} }\n      finish("aborted", "aborted", undefined);\n    },'
+          if abort_old not in boot_text:
+              raise SystemExit("onAbort anchor missing; refusing to publish a partial fix")
+          boot_text = boot_text.replace(abort_old, abort_new, 1)
+
+          exit_old = '    onExit: (code) => {\n      append("[shell] process exited, code " + code, "sys");\n      finish(code === 0 ? "exited" : "aborted", "exited (" + code + ")", code);\n    },'
+          exit_new = '    onExit: (code) => {\n      append("[shell] process exited, code " + code, "sys");\n      if (code !== 0 && window.__bwCrashOverlay) { try { window.__bwCrashOverlay("Blender exited with code " + code); } catch (_) {} }\n      finish(code === 0 ? "exited" : "aborted", "exited (" + code + ")", code);\n    },'
+          if exit_old not in boot_text:
+              raise SystemExit("onExit anchor missing; refusing to publish a partial fix")
+          boot_text = boot_text.replace(exit_old, exit_new, 1)
+
           fallback_py = '''import bpy
           from bpy_extras import view3d_utils
 
@@ -266,11 +350,23 @@ jobs:
           grep -q 'view3d.bw_web_select' site/boot-windowed.js
           grep -q 'context.scene.ray_cast' site/boot-windowed.js
           grep -q 'show_gizmo = False' site/boot-windowed.js
+          grep -q 'const GATE = gateMode() || (window.__BW_GATE_DEFAULT || null);' site/boot-windowed.js
+          grep -q '__bwCrashOverlay' site/boot-windowed.js
+          grep -q '__BW_GATE_DEFAULT' site/index.html
           grep -q 'bw-crash-overlay' site/index.html
           grep -q 'Reload Blender' site/index.html
           ! grep -q 'id="run" class="' site/index.html
           node -c site/boot-windowed.js
-          echo "Verified: Pages uses the interactive windowed Blender launcher with WebGPU-safe object selection, gizmo-hover mitigation, and crash-recovery overlay"
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          html = Path("site/index.html").read_text(encoding="utf-8")
+          m = re.search(r'<script>\n(.*?)\n</script>', html, re.S)
+          assert m and "bw-crash-overlay" in m.group(1), "hardening script missing"
+          Path("/tmp/overlay-check.js").write_text(m.group(1), encoding="utf-8")
+          PY
+          node -c /tmp/overlay-check.js
+          echo "Verified: interactive launcher, default gate mode, crash overlay + worker-abort wiring, WebGPU-safe selection and gizmo mitigation"
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
