@@ -1,4 +1,4 @@
-# LAUNCH.md — compliance, naming, and the X post
+# LAUNCH.md — compliance, naming, and the X post 
 
 The launch is gated on M8 plus every box here. Compliance is the easy part; framing is the risk. Context that must inform the post: on 2026-05-01 the Blender Foundation publicly apologized for accepting Anthropic as a Development Fund patron after community backlash, converted it to a one-time donation, and stated "Blender is made by humans for humans. No generative AI functionality is currently available or planned." Blender's contributor handbook now bans AI commit authorship and treats unreviewed AI code as a copyright risk. This project is legally clean and openly derivative — but the framing must not re-detonate that fight.
 
