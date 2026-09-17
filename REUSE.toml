@@ -13,7 +13,7 @@ SPDX-License-Identifier = "GPL-2.0-or-later"
 # Project legal, attribution and provenance documents. Part of the shipped
 # GPL-3.0-or-later aggregate.
 [[annotations]]
-path = ["AUTHORS", "LICENSE", "NOTICE", "PROVENANCE.md", "README.md", "THIRD-PARTY.md", "REUSE.toml"]
+path = ["AUTHORS", "CHANGELOG.md", "LICENSE", "NOTICE", "PROVENANCE.md", "README.md", "THIRD-PARTY.md", "REUSE.toml"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 blender-web contributors"
 SPDX-License-Identifier = "GPL-3.0-or-later"
@@ -245,3 +245,26 @@ path = ["sandbox/memory64-probe/fmt-12.1.0/**"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "Victor Zverovich and fmt contributors"
 SPDX-License-Identifier = "MIT"
+
+# Site assembly and release plumbing: the Pages deploy workflow and the
+# minimal COOP/COEP service worker it publishes. Project-authored files in
+# the shipped GPL-3.0-or-later aggregate. (The service worker is a fresh
+# minimal implementation, not gzuidhof's MIT coi-serviceworker.)
+[[annotations]]
+path = [".github/workflows/pages.yml", "coi-serviceworker.js"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 blender-web contributors"
+SPDX-License-Identifier = "GPL-3.0-or-later"
+
+# Documentation screenshots of the running Blender-derived UI (splash artwork
+# included) retain upstream terms alongside our capture work.
+[[annotations]]
+path = [
+  "docs/media/still-boot.png",
+  "docs/media/still-object-mode.png",
+  "docs/media/still-orbit.png",
+  "docs/media/still-resized-fixed.png",
+]
+precedence = "override"
+SPDX-FileCopyrightText = ["Blender Authors", "2026 blender-web contributors"]
+SPDX-License-Identifier = "GPL-2.0-or-later"
