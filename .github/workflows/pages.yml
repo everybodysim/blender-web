@@ -89,6 +89,46 @@ jobs:
               p.write_text(text, encoding="utf-8")
           PY
 
+      - name: Make the release boot Blender's real interactive UI
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          exact = 'blender --background --factory-startup --python-expr import bpy; print(\'BPY_OK\', bpy.app.version_string, len(bpy.data.objects))'
+          found = []
+          for p in Path("site").rglob("*.js"):
+              try:
+                  text = p.read_text(encoding="utf-8")
+              except UnicodeDecodeError:
+                  continue
+              if exact in text:
+                  text = text.replace(exact, 'blender --factory-startup', 1)
+                  p.write_text(text, encoding="utf-8")
+                  found.append(str(p))
+
+          # Some release builds keep argv as an array rather than the display string.
+          # Remove only the diagnostic/background arguments when all three markers occur.
+          if not found:
+              for p in Path("site").rglob("*.js"):
+                  try:
+                      text = p.read_text(encoding="utf-8")
+                  except UnicodeDecodeError:
+                      continue
+                  if '--background' not in text or '--python-expr' not in text or 'BPY_OK' not in text:
+                      continue
+                  original = text
+                  text = text.replace('"--background",', '').replace("'--background',", '')
+                  text = re.sub(r'(["\'])--python-expr\1\s*,\s*["\'][^"\']*BPY_OK[^"\']*["\']\s*,?', '', text)
+                  if text != original:
+                      p.write_text(text, encoding="utf-8")
+                      found.append(str(p))
+
+          if len(found) != 1:
+              raise SystemExit(f"Expected exactly one Blender boot script to switch to interactive mode, found {found}")
+          print("Interactive Blender boot patched:", found[0])
+          PY
+
       - name: Add GitHub Pages base-path compatibility
         run: |
           python3 - <<'PY'
@@ -100,18 +140,24 @@ jobs:
           p.write_text(text, encoding="utf-8")
           PY
 
-      - name: Add pthread canvas compatibility
+      - name: Add fullscreen Blender canvas compatibility
         run: |
           python3 - <<'PY'
           from pathlib import Path
           p = Path("site/index.html")
           text = p.read_text(encoding="utf-8")
           if 'id="canvas"' not in text:
-              text = text.replace('<body>', '<body>\n    <canvas id="canvas" width="1" height="1" aria-hidden="true"></canvas>', 1)
+              text = text.replace('<body>', '<body>\n    <canvas id="canvas" aria-hidden="true"></canvas>', 1)
+          style = '''<style>
+          html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+          #canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; z-index: 9999; }
+          </style>'''
+          if '#canvas { position: fixed;' not in text:
+              text = text.replace('</head>', style + '\n</head>', 1)
           marker = '<script src="./bin/blender_browser.js"></script>'
           bootstrap = '''<script>
-          // Emscripten's pthread startup expects the canvas selector #canvas to exist.
-          // Blender is launched in background/headless mode, so this is a 1x1 compatibility canvas.
+          // Emscripten pthread startup needs #canvas. Blender's interactive GHOST/WebGPU
+          // window uses this same canvas, so keep it fullscreen instead of using a 1x1 probe.
           window.Module = window.Module || {};
           window.Module.canvas = document.getElementById('canvas');
           </script>'''
@@ -160,6 +206,10 @@ jobs:
           ! grep -R 'pthread_create: could not find canvas with ID' site --include='*.js'
           ! grep -R 'src="/bin/' site --include='*.html' --include='*.js'
           ! grep -R 'src="/boot.js"' site --include='*.html' --include='*.js'
+          if grep -R -- '--background' site --include='*.js' >/dev/null; then
+            echo 'ERROR: interactive build still contains --background' >&2
+            exit 1
+          fi
           echo "Pages artifact checks passed"
 
       - name: Configure GitHub Pages
