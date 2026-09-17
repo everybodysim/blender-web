@@ -299,7 +299,7 @@ jobs:
           // [pages-hardening] resolution scale: renders the backing store at
           // scale * cssPx and lets CSS stretch edge-to-edge. Wasm frame cost
           // scales with backing pixels. ?scale=N (0.4-1.5) overrides and
-          // persists in localStorage; default 0.85.
+          // persists in localStorage; default 0.70 (~2x fewer pixels than 1.0).
           (function () {
             var scale = null;
             try {
@@ -311,7 +311,7 @@ jobs:
                 scale = parseFloat(localStorage.getItem("bw-scale"));
               }
             } catch (_) {}
-            window.__BW_SCALE = (scale && isFinite(scale)) ? scale : 0.85;
+            window.__BW_SCALE = (scale && isFinite(scale)) ? scale : 0.70;
           })();
           const GATE = gateMode() || (window.__BW_GATE_DEFAULT || null);'''
           boot_text = boot_text.replace('const GATE = gateMode() || (window.__BW_GATE_DEFAULT || null);',

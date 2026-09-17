@@ -31,9 +31,9 @@ cd ..
 # is the right place to surface it).
 git -C upstream config lfs.fetchinclude "release/datafiles/*"
 git -C upstream lfs pull || echo "bootstrap: lfs pull incomplete (expected on GitHub mirror); probing gaps"
-GAPS=$(cd upstream && find release/datafiles -type f -size -2k 2>/dev/null | while read -r f; do
-  head -c 30 "$f" 2>/dev/null | grep -q "^version https://git-lfs" && echo "$f"
-done)
+GAPS=$(cd upstream && { find release/datafiles -type f -size -2k 2>/dev/null | while read -r f; do
+  if head -c 30 "$f" 2>/dev/null | grep -q "^version https://git-lfs"; then echo "$f"; fi
+done; true; })
 if [ -n "$GAPS" ]; then
   echo "bootstrap: $(echo "$GAPS" | wc -l) datafiles still unresolved from GitHub LFS; trying projects.blender.org"
   git -C upstream remote add blender https://projects.blender.org/blender/blender.git 2>/dev/null || true
@@ -41,9 +41,9 @@ if [ -n "$GAPS" ]; then
     && git -C upstream lfs fetch blender "$PIN_BRANCH" \
     && git -C upstream lfs checkout \
     || echo "bootstrap: projects.blender.org fallback incomplete"
-  GAPS=$(cd upstream && find release/datafiles -type f -size -2k 2>/dev/null | while read -r f; do
-    head -c 30 "$f" 2>/dev/null | grep -q "^version https://git-lfs" && echo "$f"
-  done)
+  GAPS=$(cd upstream && { find release/datafiles -type f -size -2k 2>/dev/null | while read -r f; do
+    if head -c 30 "$f" 2>/dev/null | grep -q "^version https://git-lfs"; then echo "$f"; fi
+  done; true; })
 fi
 if [ -n "$GAPS" ]; then
   echo "bootstrap: WARNING - datafiles still missing LFS objects:"
