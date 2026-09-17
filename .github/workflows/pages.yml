@@ -243,6 +243,40 @@ jobs:
           boot_text = boot_text.replace(gate_marker,
               'const GATE = gateMode() || (window.__BW_GATE_DEFAULT || null);', 1)
 
+          # (2) DPR CAP (full-window perf: every wasm frame renders backing pixels).
+          #     The unpatched shell renders at raw devicePixelRatio; on a 4K/HiDPI
+          #     display that is 2x+ the pixels per frame of a 1080p window and is the
+          #     single biggest controllable per-frame cost while staying full-window.
+          #     Default cap 1.25 (sharper is a ?dpr= query away: ?dpr=0 = native
+          #     uncapped, ?dpr=N = exact value). Both DPR reads in the shell funnel
+          #     through the same source line, so one anchored replace covers boot and
+          #     resize; a second replace covers the boot-time resize probe.
+          dpr_helper = '''
+          // [pages-hardening] DPR cap for full-window frame cost (see workflow).
+          (function () {
+            var cap = 1.25;
+            try {
+              var q = new URLSearchParams(location.search).get("dpr");
+              if (q === "0") { cap = 0; }
+              else if (q) { cap = Math.min(3, Math.max(0.5, parseFloat(q))); }
+            } catch (_) {}
+            window.__BW_DPR_CAP = cap;
+          })();
+          function shellDpr(native) {
+            var cap = window.__BW_DPR_CAP;
+            if (!cap) return native;
+            return Math.min(native, cap);
+          }
+          const GATE = gateMode() || (window.__BW_GATE_DEFAULT || null);'''
+          boot_text = boot_text.replace('const GATE = gateMode() || (window.__BW_GATE_DEFAULT || null);',
+              dpr_helper, 1)
+          dpr_marker = 'const dpr = window.devicePixelRatio || 1;'
+          dpr_count = boot_text.count(dpr_marker)
+          if dpr_count != 2:
+              raise SystemExit(f"expected exactly 2 DPR reads, found {dpr_count}; refusing a partial patch")
+          boot_text = boot_text.replace(dpr_marker,
+              'const dpr = shellDpr(window.devicePixelRatio || 1);')
+
           abort_old = '    onAbort: (what) => {\n      append("[shell] onAbort: " + what, "err");\n      finish("aborted", "aborted", undefined);\n    },'
           abort_new = '    onAbort: (what) => {\n      append("[shell] onAbort: " + what, "err");\n      if (window.__bwCrashOverlay) { try { window.__bwCrashOverlay("Blender aborted: " + what); } catch (_) {} }\n      finish("aborted", "aborted", undefined);\n    },'
           if abort_old not in boot_text:
@@ -339,6 +373,7 @@ jobs:
           grep -q 'context.scene.ray_cast' site/boot-windowed.js
           grep -q 'show_gizmo = False' site/boot-windowed.js
           grep -q 'const GATE = gateMode() || (window.__BW_GATE_DEFAULT || null);' site/boot-windowed.js
+          grep -q 'shellDpr(window.devicePixelRatio || 1)' site/boot-windowed.js
           grep -q '__bwCrashOverlay' site/boot-windowed.js
                     grep -q 'bw-crash-overlay' site/index.html
           grep -q 'Reload Blender' site/index.html
