@@ -46,13 +46,10 @@ jobs:
           RELEASE_ROOT="$(dirname "$SHELL_DIR")"
           cp -a "$SHELL_DIR/." site/
 
-          # The release server normally serves shell/ and exposes its sibling
-          # bin/ directory. Recreate that layout under the Pages document root.
           if [[ -d "$RELEASE_ROOT/bin" ]]; then
             cp -a "$RELEASE_ROOT/bin" site/bin
           fi
 
-          # Preserve any additional sibling runtime directories shipped beside bin/.
           for dir in assets data lib wasm; do
             if [[ -d "$RELEASE_ROOT/$dir" && ! -e "site/$dir" ]]; then
               cp -a "$RELEASE_ROOT/$dir" "site/$dir"
@@ -62,40 +59,53 @@ jobs:
           test -f site/index.html
           test -d site/bin
 
-      - name: Install COOP/COEP service worker
+      - name: Install COOP/COEP service worker correctly
         run: |
           cp coi-serviceworker.js site/coi-serviceworker.js
           python3 - <<'PY'
           from pathlib import Path
           p = Path("site/index.html")
           text = p.read_text(encoding="utf-8")
-          marker = '<script src="./coi-serviceworker.js"></script>'
-          if marker not in text:
-              if "</head>" in text:
-                  text = text.replace("</head>", f"    {marker}\n</head>", 1)
+          bad = '<script src="./coi-serviceworker.js"></script>'
+          text = text.replace(bad, '')
+          registration = '''<script>
+          (function () {
+            if (!window.isSecureContext || !('serviceWorker' in navigator)) return;
+            navigator.serviceWorker.register('./coi-serviceworker.js', {scope: './'})
+              .then(function () {
+                if (!navigator.serviceWorker.controller) {
+                  window.location.reload();
+                }
+              })
+              .catch(function (err) {
+                console.error('COOP/COEP service worker registration failed:', err);
+              });
+          })();
+          </script>'''
+          if 'navigator.serviceWorker.register' not in text:
+              if '</head>' in text:
+                  text = text.replace('</head>', registration + '\n</head>', 1)
               else:
-                  text = marker + "\n" + text
-              p.write_text(text, encoding="utf-8")
+                  text = registration + '\n' + text
+          p.write_text(text, encoding='utf-8')
           PY
 
       - name: Fix GitHub Pages relative runtime paths
         run: |
           python3 - <<'PY'
           from pathlib import Path
-
           index = Path("site/index.html")
           text = index.read_text(encoding="utf-8")
-          text = text.replace('<script src="/bin/blender_browser.js"></script>',
-                              '<script src="./bin/blender_browser.js"></script>')
+          text = text.replace('<script src="/bin/blender_browser.js"></script>', '<script src="./bin/blender_browser.js"></script>')
           index.write_text(text, encoding="utf-8")
-
-          for name in ("boot.js", "boot-windowed.js"):
-              p = Path("site") / name
-              if p.exists():
+          for p in Path("site").rglob("*.js"):
+              try:
                   text = p.read_text(encoding="utf-8")
-                  text = text.replace('const BIN_PREFIX = "/bin/";',
-                                      'const BIN_PREFIX = new URL("./bin/", document.baseURI).href;')
-                  p.write_text(text, encoding="utf-8")
+              except UnicodeDecodeError:
+                  continue
+              text = text.replace('const BIN_PREFIX = "/bin/";', 'const BIN_PREFIX = new URL("./bin/", document.baseURI).href;')
+              text = text.replace('"/bin/', '"./bin/')
+              p.write_text(text, encoding="utf-8")
           PY
 
       - name: Add GitHub Pages base-path compatibility
@@ -104,10 +114,19 @@ jobs:
           from pathlib import Path
           p = Path("site/index.html")
           text = p.read_text(encoding="utf-8")
-          if '<base href="./">' not in text and "<head>" in text:
-              text = text.replace("<head>", '<head>\n    <base href="./">', 1)
+          if '<base href="./">' not in text and '<head>' in text:
+              text = text.replace('<head>', '<head>\n    <base href="./">', 1)
               p.write_text(text, encoding="utf-8")
           PY
+
+      - name: Verify generated Pages artifact
+        run: |
+          set -euo pipefail
+          test -f site/index.html
+          test -f site/bin/blender_browser.js
+          grep -q "navigator.serviceWorker.register" site/index.html
+          ! grep -R 'src="/bin/' site --include='*.html' --include='*.js'
+          echo "Pages artifact checks passed"
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
