@@ -116,9 +116,10 @@ jobs:
               fi
             done
             # prune AFTER the python stdlib exists
-            if bash harness/buildwrap.sh bash scripts/deps/prune-preload-pycache.sh; then
-              echo "== deps round $round: prune-preload-pycache OK"
-            fi
+            # python.sh prunes its own stdlib with the required root argument.
+            # Do not invoke the helper bare here: it intentionally rejects an
+            # empty root list (and must not count as a missing dependency).
+            echo "== deps round $round: pycache pruning handled by python.sh"
             if [ "$failed" -eq 0 ]; then
               echo "DEPS FIXPOINT REACHED after round $round"
               break
